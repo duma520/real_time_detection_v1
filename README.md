@@ -1,3 +1,5 @@
+### 🤖 Assistant
+
 # 实时变化检测软件说明书
 
 ## 1. 简介
@@ -95,8 +97,8 @@
 ## 7. 技术支持
 
 如有任何问题或建议，请联系开发者：
-- **邮箱**：support@example.com
-- **GitHub**：[https://github.com/example](https://github.com/example)
+- **邮箱**：无
+- **GitHub**：[https://github.com/duma520/Real_Time_Detection](https://github.com/duma520/Real_Time_Detection)
 
 ## 8. 版权声明
 
