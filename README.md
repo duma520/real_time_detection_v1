@@ -107,3 +107,8 @@
 ---
 
 **注意**：本软件仅供学习和研究使用，请勿用于非法用途。
+
+#运行效果图
+
+![image](https://github.com/user-attachments/assets/e6272c4d-25be-4f3c-87ab-468fd25e6fdc)
+![image](https://github.com/user-attachments/assets/c54ff553-ac4a-4d77-a84d-9862330b737a)
