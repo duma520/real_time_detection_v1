@@ -10,7 +10,7 @@ from mss import mss
 transparency = 0.5  # 监控窗口透明度
 threshold = 30      # 变化检测阈值
 min_contour_area = 500  # 最小变化区域
-always_on_top = False  # 是否置顶
+always_on_top = False  # 是否置顶监控面板窗口
 
 # 解析命令行参数
 parser = argparse.ArgumentParser(description="实时变化检测")
@@ -19,7 +19,7 @@ args = parser.parse_args()
 
 # 创建主窗口
 root = tk.Tk()
-root.title("实时变化检测控制面板")
+root.title("控制面板窗口")
 root.geometry("500x300")  # 设置主窗口大小
 
 # 打开摄像头或透明窗口
@@ -35,7 +35,7 @@ else:
 
 # 创建监控窗口
 monitor_window = tk.Toplevel(root)
-monitor_window.title("监控窗口")
+monitor_window.title("监控面板窗口")
 monitor_window.geometry("800x600")  # 设置监控窗口大小
 monitor_window.attributes("-alpha", transparency)  # 设置初始透明度
 
@@ -95,15 +95,12 @@ def update_frame():
             x, y, w, h = cv2.boundingRect(contour)
             cv2.rectangle(current_frame, (x, y), (x + w, y + h), (0, 255, 0), 2)
 
-    # 将 OpenCV 图像转换为 PIL 图像
-    current_frame_rgb = cv2.cvtColor(current_frame, cv2.COLOR_BGR2RGB)
-    img = Image.fromarray(current_frame_rgb)
-    img_tk = ImageTk.PhotoImage(image=img)
+    # 显示图像 变化区域结果面板窗口
+    cv2.imshow("Change Detection Result Panel", current_frame)
+    cv2.setWindowProperty("Change Detection Result Panel", cv2.WND_PROP_TOPMOST, int(always_on_top_result_var.get()))
 
-    # 更新画布
-    canvas.delete("all")  # 清空画布
-    canvas.create_image(0, 0, anchor=tk.NW, image=img_tk)
-    canvas.image = img_tk  # 防止图像被垃圾回收
+    # 将焦点返回到控制面板窗口
+    root.focus_force()
 
     # 递归调用，持续更新帧
     monitor_window.after(30, update_frame)
@@ -138,6 +135,33 @@ def update_transparency_from_entry():
         pass
 
 transparency_entry.bind("<Return>", lambda event: update_transparency_from_entry())
+
+# 帧的读取频率调整
+frame_rate_frame = tk.Frame(control_frame)
+frame_rate_frame.pack(fill=tk.X, pady=5)
+
+frame_rate_label = tk.Label(frame_rate_frame, text="帧的读取频率:")
+frame_rate_label.pack(side=tk.LEFT)
+
+frame_rate_scale = tk.Scale(frame_rate_frame, from_=1, to=120, orient=tk.HORIZONTAL, length=300,
+                            command=lambda val: globals().update(frame_rate=int(val)))
+frame_rate_scale.set(30)  # 默认值为30
+frame_rate_scale.pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+frame_rate_entry = tk.Entry(frame_rate_frame, width=5)
+frame_rate_entry.insert(0, "30")  # 默认值为30
+frame_rate_entry.pack(side=tk.LEFT, padx=5)
+
+def update_frame_rate_from_entry():
+    try:
+        value = int(frame_rate_entry.get())
+        if 10 <= value <= 1000:
+            frame_rate_scale.set(value)
+            globals().update(frame_rate=value)
+    except ValueError:
+        pass
+
+frame_rate_entry.bind("<Return>", lambda event: update_frame_rate_from_entry())
 
 # 变化检测阈值调整
 threshold_frame = tk.Frame(control_frame)
@@ -195,9 +219,29 @@ min_area_entry.bind("<Return>", lambda event: update_min_area_from_entry())
 
 # 是否置顶复选框
 always_on_top_var = tk.BooleanVar(value=always_on_top)
-always_on_top_check = tk.Checkbutton(control_frame, text="总是置顶", variable=always_on_top_var,
+always_on_top_check = tk.Checkbutton(control_frame, text="总是置顶监控面板", variable=always_on_top_var,
                                     command=lambda: monitor_window.attributes("-topmost", always_on_top_var.get()))
 always_on_top_check.pack(pady=5)
+
+# 是否置顶变化区域结果面板复选框
+always_on_top_result_var = tk.BooleanVar(value=False)
+always_on_top_result_check = tk.Checkbutton(control_frame, text="总是置顶变化结果面板", variable=always_on_top_result_var,
+                                           command=lambda: cv2.setWindowProperty("Change Detection Result Panel", cv2.WND_PROP_TOPMOST, int(always_on_top_result_var.get())))
+always_on_top_result_check.pack(pady=5)
+
+# 绑定输入框的焦点事件
+def on_entry_focus_in(event):
+    # 当输入框获得焦点时，阻止其他控件抢占焦点
+    root.after(100, lambda: event.widget.focus_set())
+
+def on_entry_focus_out(event):
+    # 当输入框失去焦点时，恢复正常的焦点管理
+    pass
+
+# 为每个输入框绑定事件
+for entry in [transparency_entry, frame_rate_entry, threshold_entry, min_area_entry]:
+    entry.bind("<FocusIn>", on_entry_focus_in)
+    entry.bind("<FocusOut>", on_entry_focus_out)
 
 # 启动更新帧的函数
 update_frame()
