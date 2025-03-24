@@ -1,4 +1,4 @@
-# Version 19 - 完整实现
+# Version 22
 
 import cv2
 import tkinter as tk
@@ -25,6 +25,7 @@ result_window_roi = None  # 结果窗口的ROI区域
 selecting_roi = False    # 是否正在选择ROI
 roi_start_point = None   # ROI选择的起点
 roi_end_point = None     # ROI选择的终点
+frame_rate = 30  # 添加全局变量定义
 
 # 创建主窗口
 root = tk.Tk()
@@ -456,8 +457,20 @@ def update_transparency_from_entry():
             transparency_scale.set(value)
             if monitor_window:
                 monitor_window.attributes("-alpha", value)
+            globals().update(transparency=value)
     except ValueError:
         pass
+
+def update_transparency_from_scale(val):
+    value = float(val)
+    transparency_entry.delete(0, tk.END)
+    transparency_entry.insert(0, str(value))
+    if monitor_window:
+        monitor_window.attributes("-alpha", value)
+    globals().update(transparency=value)
+
+transparency_scale.config(command=update_transparency_from_scale)
+transparency_entry.bind("<Return>", lambda event: update_transparency_from_entry())
 
 transparency_entry.bind("<Return>", lambda event: update_transparency_from_entry())
 
@@ -480,12 +493,18 @@ frame_rate_entry.pack(side=tk.LEFT, padx=5)
 def update_frame_rate_from_entry():
     try:
         value = int(frame_rate_entry.get())
-        if 10 <= value <= 1000:
+        if 1 <= value <= 120:
             frame_rate_scale.set(value)
             globals().update(frame_rate=value)
     except ValueError:
         pass
 
+def update_frame_rate_from_scale(val):
+    frame_rate_entry.delete(0, tk.END)
+    frame_rate_entry.insert(0, str(val))
+    globals().update(frame_rate=int(val))
+
+frame_rate_scale.config(command=update_frame_rate_from_scale)
 frame_rate_entry.bind("<Return>", lambda event: update_frame_rate_from_entry())
 
 # 变化检测阈值调整
@@ -513,6 +532,12 @@ def update_threshold_from_entry():
     except ValueError:
         pass
 
+def update_threshold_from_scale(val):
+    threshold_entry.delete(0, tk.END)
+    threshold_entry.insert(0, str(val))
+    globals().update(threshold=int(val))
+
+threshold_scale.config(command=update_threshold_from_scale)
 threshold_entry.bind("<Return>", lambda event: update_threshold_from_entry())
 
 # 最小变化区域调整
@@ -540,6 +565,12 @@ def update_min_area_from_entry():
     except ValueError:
         pass
 
+def update_min_area_from_scale(val):
+    min_area_entry.delete(0, tk.END)
+    min_area_entry.insert(0, str(val))
+    globals().update(min_contour_area=int(val))
+
+min_area_scale.config(command=update_min_area_from_scale)
 min_area_entry.bind("<Return>", lambda event: update_min_area_from_entry())
 
 # 是否置顶复选框
