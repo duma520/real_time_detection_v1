@@ -146,8 +146,8 @@
 如有任何使用问题或建议，请联系：
 - 技术支持邮箱：无
 - 客服热线：无
-- 官方网站：[www.detectionsystem.com](https://github.com/duma520/Real_Time_Detection)
-
+- 官方网站：[[www.detectionsystem.com](https://github.com/duma520/Real_Time_Detection)
+](https://github.com/duma520/Real_Time_Detection)
 ---
 
 本说明书随软件版本更新而调整，请以实际软件功能为准。使用前请仔细阅读最终用户许可协议。
