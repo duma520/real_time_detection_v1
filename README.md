@@ -146,7 +146,7 @@
 如有任何使用问题或建议，请联系：
 - 技术支持邮箱：无
 - 客服热线：无
-- 官方网站：https://github.com/duma520/Real_Time_Detectio
+- 官方网站：https://github.com/duma520/Real_Time_Detection
 
 ---
 
