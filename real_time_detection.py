@@ -12,7 +12,9 @@ import os
 
 
 # 全局变量
-version = "v61.0.14"  # 版本
+version = "v61.2.0"  # 版本
+author = "杜玛"
+copyrigh = "Copyright © 杜玛"
 threshold = 30  # 变化检测阈值
 min_contour_area = 500  # 最小变化区域
 monitoring_process = None  # 当前监控的进程
@@ -21,7 +23,7 @@ monitor_window = None  # 监控窗口
 sct = mss()  # 屏幕截图对象
 frame_rate = 30  # 帧率
 result_window_size = (800, 600)  # 结果窗口初始大小
-lock_aspect_ratio = True  # 是否锁定宽高比
+lock_aspect_ratio = False  # 是否锁定宽高比
 icon_cache = {}  # 进程图标缓存
 monitor_area_roi = None  # 监控区域的ROI
 selecting_monitor_area = False  # 是否正在选择监控区域
@@ -29,7 +31,7 @@ selecting_monitor_area = False  # 是否正在选择监控区域
 
 # 创建主窗口
 root = tk.Tk()
-root.title(f"智能变化检测系统 - 控制面板 ({version})")
+root.title(f"智能变化检测系统 - 控制面板 ({version} | {author} | {copyrigh})")
 root.geometry("500x520")  # 设置主窗口大小
 root.resizable(False, False)  # 禁止改变窗口大小
 
@@ -81,7 +83,7 @@ def get_window_rect(hwnd):
 # 创建进程选择窗口
 def create_process_selection_window():
     selection_window = tk.Toplevel(root)
-    selection_window.title(f"选择需要监控的程序 ({version})")
+    selection_window.title(f"选择需要监控的程序 ({version} | {author} | {copyrigh})")
     selection_window.geometry("750x500")
     
     # 创建搜索框
@@ -209,7 +211,7 @@ def create_process_selection_window():
 # 创建摄像头选择窗口
 def create_camera_selection_window():
     selection_window = tk.Toplevel(root)
-    election_window.title(f"选择监控镜头 ({version})")
+    selection_window.title(f"选择监控镜头 ({version} | {author} | {copyrigh})")
     selection_window.geometry("400x300")
     
     # 获取可用摄像头
@@ -307,7 +309,7 @@ def create_monitor_window():
         monitor_window.destroy()
     
     monitor_window = tk.Toplevel(root)
-    monitor_window.title(f"监控面板窗口 ({version})")
+    monitor_window.title(f"监控面板窗口 ({version} | {author} | {copyrigh})")
     monitor_window.geometry("800x600")  # 设置监控窗口大小
     
     # 创建画布用于显示视频帧
@@ -624,10 +626,10 @@ def update_frame():
 
     # 显示图像
     cv2.namedWindow("Change Detection Result Panel", cv2.WINDOW_NORMAL)
-    
+
     # 设置窗口属性
     cv2.setWindowProperty("Change Detection Result Panel", cv2.WND_PROP_TOPMOST, int(always_on_top_result_var.get()))
-    
+
     if lock_aspect_ratio:
         # 强制设置宽高比
         img_h, img_w = current_frame.shape[:2]
@@ -639,7 +641,47 @@ def update_frame():
                 cv2.resizeWindow("Change Detection Result Panel", current_w, new_h)
     else:
         cv2.setWindowProperty("Change Detection Result Panel", cv2.WND_PROP_ASPECT_RATIO, cv2.WINDOW_FREERATIO)
+
+     # 根据是否启用图像按比例缩放来处理图像
+    if scale_image_var.get():
+        # 获取当前窗口大小
+        try:
+            _, _, window_w, window_h = cv2.getWindowImageRect("Change Detection Result Panel")
+            if window_w > 0 and window_h > 0:
+                # 计算保持宽高比的缩放尺寸
+                img_h, img_w = current_frame.shape[:2]
+                img_ratio = img_w / img_h
+                window_ratio = window_w / window_h
+            
+                if img_ratio > window_ratio:
+                    # 宽度受限
+                    new_w = window_w
+                    new_h = int(window_w / img_ratio)
+                else:
+                    # 高度受限
+                    new_h = window_h
+                    new_w = int(window_h * img_ratio)
+                
+                # 缩放图像并添加黑色边框以保持比例
+                resized_img = cv2.resize(current_frame, (new_w, new_h))
+                
+                # 创建黑色背景图像
+                display_img = np.zeros((window_h, window_w, 3), dtype=np.uint8)
+                
+                # 计算居中位置
+                x_offset = (window_w - new_w) // 2
+                y_offset = (window_h - new_h) // 2
+                
+                # 将缩放后的图像放入黑色背景中央
+                display_img[y_offset:y_offset+new_h, x_offset:x_offset+new_w] = resized_img
+                
+                current_frame = display_img
+        except:
+            pass
+
+
     cv2.imshow("Change Detection Result Panel", current_frame)
+
 
 
     # 将焦点返回到控制面板窗口
@@ -785,19 +827,36 @@ min_area_entry.bind("<Return>", lambda event: update_min_area_from_entry())
 
 # 是否置顶变化区域结果面板复选框
 always_on_top_result_var = tk.BooleanVar(value=False)
-always_on_top_result_check = tk.Checkbutton(settings_frame, text="总是置顶变化结果面板", variable=always_on_top_result_var,
-                                           command=lambda: cv2.setWindowProperty("Change Detection Result Panel", cv2.WND_PROP_TOPMOST, int(always_on_top_result_var.get())))
-always_on_top_result_check.pack(pady=5)
+# 创建第一行复选框框架
+checkbox_frame1 = tk.Frame(settings_frame)
+checkbox_frame1.pack(anchor='w', pady=5)  # 左对齐
 
+# 是否置顶变化区域结果面板复选框
+always_on_top_result_var = tk.BooleanVar(value=False)
+always_on_top_result_check = tk.Checkbutton(checkbox_frame1, text="置顶变化结果面板", variable=always_on_top_result_var,
+                                           command=lambda: cv2.setWindowProperty("Change Detection Result Panel", cv2.WND_PROP_TOPMOST, int(always_on_top_result_var.get())))
+always_on_top_result_check.pack(side=tk.LEFT, padx=5)
+
+# 锁定结果窗体比例复选框
 lock_aspect_var = tk.BooleanVar(value=lock_aspect_ratio)
-lock_aspect_check = tk.Checkbutton(settings_frame, text="锁定结果窗口宽高比", variable=lock_aspect_var,
+lock_aspect_check = tk.Checkbutton(checkbox_frame1, text="结果窗体按比例缩放", variable=lock_aspect_var,
                                   command=lambda: [
                                       globals().update(lock_aspect_ratio=lock_aspect_var.get()),
                                       cv2.setWindowProperty("Change Detection Result Panel", cv2.WND_PROP_ASPECT_RATIO, 
                                                           cv2.WINDOW_KEEPRATIO if lock_aspect_var.get() else cv2.WINDOW_FREERATIO)
                                   ])
+lock_aspect_check.pack(side=tk.LEFT, padx=5)
 
-lock_aspect_check.pack(pady=5)
+# 创建第二行复选框框架
+checkbox_frame2 = tk.Frame(settings_frame)
+checkbox_frame2.pack(anchor='w', pady=5)  # 左对齐
+
+# 结果窗口内图按比例缩放复选框
+scale_image_var = tk.BooleanVar(value=True)
+scale_image_check = tk.Checkbutton(checkbox_frame2, text="结果窗口内图像按比例缩放", variable=scale_image_var)
+scale_image_check.pack(side=tk.LEFT, padx=5)
+scale_image_check.select()  # 默认选中
+
 
 # 状态显示标签
 status_frame = tk.Frame(root)
