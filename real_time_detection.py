@@ -7,9 +7,10 @@ from mss import mss
 import win32gui
 import win32process
 import psutil
+import time
 
 # 全局变量
-version = "v61.20.4"  # 版本
+version = "v61.20.12"  # 版本
 author = "杜玛"
 copyrigh = "Copyright © 杜玛. All rights reserved."
 threshold = 30  # 变化检测阈值
@@ -17,13 +18,45 @@ min_contour_area = 500  # 最小变化区域
 monitoring_process = None  # 当前监控的进程
 monitoring_camera = None  # 当前监控的摄像头
 sct = mss()  # 屏幕截图对象
-frame_rate = 30  # 帧率
+frame_rate = 60  # 帧率
 lock_aspect_ratio = True  # 是否锁定宽高比
 monitor_area_roi = None  # 监控区域的ROI
 font_path = "msyh.ttf"
+max_recommended_fps = 60
+performance_test_done = False
+last_update_time = None  # 用于计算实际帧率
+actual_fps = 0          # 记录实际帧率
+cpu_monitor_enabled = True  # 是否启用CPU监控
+frame_count = 0  # 用于计数帧数
+last_boxes = []  # 存储上一帧的检测框
+fade_frames = 3  # 渐隐帧数，控制渐隐速度
+
+# 性能检测函数
+def detect_max_fps():
+    global max_recommended_fps, performance_test_done
+    test_duration = 2  # 测试2秒
+    start_time = time.time()
+    frame_count = 0
+    
+    # 模拟实际工作负载
+    test_frame = np.zeros((480, 640, 3), dtype=np.uint8)
+    while time.time() - start_time < test_duration:
+        # 模拟图像处理操作
+        gray = cv2.cvtColor(test_frame, cv2.COLOR_BGR2GRAY)
+        _ = cv2.absdiff(gray, gray)
+        frame_count += 1
+    
+    max_recommended_fps = min(360, max(30, frame_count // test_duration))
+    performance_test_done = True
+    return max_recommended_fps
+
 
 # 创建主窗口
 root = tk.Tk()
+root.after(100, lambda: (
+    detect_max_fps(),
+    status_bar.config(text=f"系统检测: 推荐最大帧率 {max_recommended_fps}FPS")
+))
 root.title(f"智能变化检测系统 ({version} | {author} | {copyrigh})")
 root.geometry("500x800")  # 设置窗口大小
 root.minsize(100, 100)  # 设置最小窗口大小
@@ -451,6 +484,35 @@ def update_video_display(frame):
 
 # 定义更新帧的函数
 def update_frame():
+    global last_boxes
+    # 性能监控
+    global last_update_time, actual_fps
+    global frame_count
+
+    # 统一性能计时起点
+    start_time = time.time()
+    frame_count += 1
+    current_time = time.time()
+
+
+
+    # CPU占用监控（每10帧检测一次）
+    if cpu_monitor_enabled and monitoring_process and frame_count % 10 == 0:
+        cpu_percent = psutil.cpu_percent(interval=0.1)
+
+        if cpu_percent > 80 and frame_rate > 60:
+            status_bar.config(
+                text=f"⚠️ CPU过载: {cpu_percent}% | 实际FPS: {actual_fps:.1f}/{frame_rate}",
+                fg="red"
+            )
+    
+    # 实际帧率计算
+    current_time = time.time()
+    if last_update_time:
+        actual_fps = 0.9 * actual_fps + 0.1 * (1 / (current_time - last_update_time))  # 平滑处理
+    last_update_time = current_time
+
+
     if monitoring_camera is not None:
         # 摄像头模式
         cap = cv2.VideoCapture(monitoring_camera)
@@ -477,6 +539,7 @@ def update_frame():
     elif monitoring_process:
         # 进程监控模式
         try:
+            start_time = time.time()
             # 获取窗口位置
             rect = get_window_rect(monitoring_process['hwnd'])
             monitor_area = {
@@ -497,11 +560,20 @@ def update_frame():
             # 读取两帧用于比较
             current_frame = np.array(sct.grab(monitor_area))
             current_frame = cv2.cvtColor(current_frame, cv2.COLOR_BGRA2BGR)
+
+            # 添加微小延迟（允许其他线程运行）
+            # time.sleep(0.001)
             
             next_frame = np.array(sct.grab(monitor_area))
             next_frame = cv2.cvtColor(next_frame, cv2.COLOR_BGRA2BGR)
+
+            # 计算实际处理耗时
+            process_time = (time.time() - start_time) * 1000  # 毫秒
+            if process_time > 10:  # 如果单次处理超过10ms
+                status_bar.config(text=f"警告：处理延迟 {process_time:.1f}ms", fg="red")
+
         except Exception as e:
-            status_bar.config(text=f"监控窗口出错: {e}")
+            status_bar.config(text=f"监控出错: {str(e)}", fg="red")
             root.after(1000, update_frame)  # 1秒后重试
             return
     else:
@@ -544,6 +616,10 @@ def update_frame():
 
     # 查找轮廓
     contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    
+    # 创建副本帧用于绘制
+    display_frame = current_frame.copy()
+
 
     # 在原始帧上绘制轮廓
     for contour in contours:
@@ -551,56 +627,242 @@ def update_frame():
             x, y, w, h = cv2.boundingRect(contour)
             cv2.rectangle(current_frame, (x, y), (x + w, y + h), (0, 255, 0), 2)
 
+    # 绘制带渐隐效果的检测框
+    current_boxes = []
+    for contour in contours:
+        if cv2.contourArea(contour) > min_contour_area:
+            x, y, w, h = cv2.boundingRect(contour)
+            current_boxes.append((x, y, w, h))
+            cv2.rectangle(display_frame, (x, y), (x+w, y+h), (0, 255, 0), 2)
+    
+    # 渐隐旧框，绘制上一帧的框（渐隐黄色）
+    for i, (x, y, w, h) in enumerate(last_boxes):
+        if (x, y, w, h) not in current_boxes:
+            alpha = i / fade_frames  # 透明度衰减
+            # alpha = 0.3 * (fade_frames - i) / fade_frames
+            color = (0, int(255*alpha), 255)  # 黄->绿渐变
+            cv2.rectangle(display_frame, (x, y), (x+w, y+h), color, 1)
+            # if alpha > 0:
+            #     overlay = display_frame.copy()
+            #     cv2.rectangle(overlay, (x, y), (x+w, y+h), (0, 255, 255), 1)
+            #     cv2.addWeighted(overlay, alpha, display_frame, 1-alpha, 0, display_frame)
+
+    last_boxes = current_boxes[-10:]  # 保留最近10个框
+ 
+
+
     # 更新视频显示
     update_video_display(current_frame)
 
-    # 递归调用，持续更新帧
-    root.after(30, update_frame)
+    # 显示最终完成的帧 改成这个会不显示变化
+    # update_video_display(display_frame)  # 而不是直接使用current_frame
+
+
+    # 计算实际帧率
+    current_time = time.time()
+    if last_update_time:
+        actual_fps = 0.9 * actual_fps + 0.1 * (1 / (current_time - last_update_time))  # 平滑处理
+    last_update_time = current_time
+
+    # 构建状态栏文本
+    status_text = f"运行中: {actual_fps:.1f}FPS"
+    if frame_rate > 120 or abs(actual_fps - frame_rate) > 10:
+        status_text += f" (设置: {frame_rate}FPS)"
+        status_bar.config(fg="red")
+    
+    # CPU状态提示（需确保前面已计算cpu_percent）
+    if 'cpu_percent' in locals() and cpu_percent > 80:
+        status_text += f" | CPU: {cpu_percent}% ⚠️ CPU过载"
+        status_bar.config(fg="red")
+    else:
+        status_bar.config(fg="black")
+    
+    status_bar.config(text=status_text)
+
+    # 帧率防护
+    # 硬性限制不超过360FPS，同时防止除零错误
+    effective_fps = min(frame_rate, 360) # 硬性上限
+    delay = max(1, int(1000 / effective_fps))  # 计算延迟时间(ms)
+    root.after(delay, update_frame)
+
+    # 性能提示
+    cpu_warning_threshold = 120  # 警告阈值
+    if frame_rate > cpu_warning_threshold:
+        status_bar.config(
+            text=f"高负载警告: {frame_rate}FPS | 推荐不超过{max_recommended_fps}FPS",
+            fg="red"
+        )
+    elif not monitoring_process and not monitoring_camera:
+        status_bar.config(text="就绪: 请选择监控源", fg="black")
+
+
+    # 高帧率警告（状态栏提示）
+    if frame_rate > 120:
+        status_bar.config(
+            text=f"高帧率警告：当前 {frame_rate}FPS (延迟 {delay}ms)",
+            fg="red"
+        )
+
+    # 递归调用，根据设置的帧率调整更新间隔
+    # root.after(delay, update_frame)
 
 # 创建控制面板内容
 def create_control_panel():
-    # 创建监控源选择区域
-    source_frame = tk.LabelFrame(control_panel, text="监控源选择", padx=10, pady=10)
-    source_frame.pack(fill=tk.X, pady=5)
+    global frame_rate_scale, threshold_scale, min_area_scale
+    global frame_rate_entry, threshold_entry, min_area_entry
+
+    # 监控源选择区域
+    source_frame = tk.LabelFrame(control_panel, text="监控源选择", padx=5, pady=5)
+    source_frame.grid(row=0, column=0, sticky="ew", pady=(0,5))
     
-    # 监控进程按钮
-    global process_button
-    process_button = tk.Button(source_frame, text="选择监控进程", command=toggle_process_monitoring)
-    process_button.pack(side=tk.LEFT, padx=5, pady=5)
+    # 使用紧凑的按钮布局
+    buttons = [
+        ("选择监控进程", toggle_process_monitoring),
+        ("选择镜头监控", toggle_camera_monitoring),
+        ("选择监控区域", select_monitor_area)
+    ]
     
-    # 监控摄像头按钮
-    global camera_button
-    camera_button = tk.Button(source_frame, text="选择镜头监控", command=toggle_camera_monitoring)
-    camera_button.pack(side=tk.LEFT, padx=5, pady=5)
+    for col, (text, cmd) in enumerate(buttons):
+        btn = tk.Button(source_frame, text=text, command=cmd)
+        btn.grid(row=0, column=col, padx=2, pady=2, sticky="ew")
+        source_frame.columnconfigure(col, weight=1)
+        if text.startswith("选择监控进程"):
+            global process_button
+            process_button = btn
+        elif text.startswith("选择镜头监控"):
+            global camera_button
+            camera_button = btn
+
+    # 参数设置区域
+    settings_frame = tk.LabelFrame(control_panel, text="检测参数设置", padx=5, pady=5)
+    settings_frame.grid(row=1, column=0, sticky="ew")
     
-    # 创建ROI控制区域
-    roi_frame = tk.LabelFrame(control_panel, text="监控区域控制", padx=10, pady=10)
-    roi_frame.pack(fill=tk.X, pady=5)
+    # 参数配置项
+    params = [
+        ("帧率(FPS):", "frame_rate", 1, 360),
+        ("变化阈值:", "threshold", 1, 100),
+        ("最小区域:", "min_contour_area", 1, 1000)
+    ]
     
-    select_monitor_button = tk.Button(roi_frame, text="选择目标监控区域", command=select_monitor_area)
-    select_monitor_button.pack(side=tk.LEFT, padx=5, pady=5)
+    # 先创建所有控件
+    for row, (label_text, var_name, min_val, max_val) in enumerate(params):
+        tk.Label(settings_frame, text=label_text).grid(row=row, column=0, padx=2, pady=2, sticky="e")
+        
+        # 创建滑块
+        if var_name == "frame_rate":
+            frame_rate_scale = tk.Scale(
+                settings_frame, 
+                from_=1, 
+                to=max_recommended_fps if performance_test_done else 360,  # 动态上限
+                orient=tk.HORIZONTAL,
+                length=150
+            )
+            frame_rate_scale.set(min(60, max_recommended_fps))
+            frame_rate_scale.set(globals()[var_name])
+            frame_rate_scale.grid(row=row, column=1, padx=2, pady=2, sticky="ew")
+            
+            frame_rate_entry = tk.Entry(settings_frame, width=4)
+            frame_rate_entry.insert(0, str(globals()[var_name]))
+            frame_rate_entry.grid(row=row, column=2, padx=2, pady=2)
+            
+        elif var_name == "threshold":
+            threshold_scale = tk.Scale(settings_frame, from_=min_val, to=max_val, orient=tk.HORIZONTAL, 
+                                     length=150)
+            threshold_scale.set(globals()[var_name])
+            threshold_scale.grid(row=row, column=1, padx=2, pady=2, sticky="ew")
+            
+            threshold_entry = tk.Entry(settings_frame, width=4)
+            threshold_entry.insert(0, str(globals()[var_name]))
+            threshold_entry.grid(row=row, column=2, padx=2, pady=2)
+            
+        elif var_name == "min_contour_area":
+            min_area_scale = tk.Scale(settings_frame, from_=min_val, to=max_val, orient=tk.HORIZONTAL, 
+                                     length=150)
+            min_area_scale.set(globals()[var_name])
+            min_area_scale.grid(row=row, column=1, padx=2, pady=2, sticky="ew")
+            
+            min_area_entry = tk.Entry(settings_frame, width=4)
+            min_area_entry.insert(0, str(globals()[var_name]))
+            min_area_entry.grid(row=row, column=2, padx=2, pady=2)
     
-    # 创建参数设置区域
-    settings_frame = tk.LabelFrame(control_panel, text="检测参数设置", padx=10, pady=10)
-    settings_frame.pack(fill=tk.X, pady=5)
+    # 然后绑定事件处理函数
+    def on_frame_rate_scale(val):
+        frame_rate_entry.delete(0, tk.END)
+        frame_rate_entry.insert(0, str(int(float(val))))
+        globals()["frame_rate"] = int(float(val))
+        status_bar.config(text=f"帧率已设置为: {int(float(val))} FPS")
     
-    # 帧的读取频率调整
-    frame_rate_frame = tk.Frame(settings_frame)
-    frame_rate_frame.pack(fill=tk.X, pady=5)
+    def on_threshold_scale(val):
+        threshold_entry.delete(0, tk.END)
+        threshold_entry.insert(0, str(int(float(val))))
+        globals()["threshold"] = int(float(val))
+        status_bar.config(text=f"变化检测阈值已设置为: {int(float(val))}")
     
-    frame_rate_label = tk.Label(frame_rate_frame, text="帧率(FPS):")
-    frame_rate_label.pack(side=tk.LEFT)
+    def on_min_area_scale(val):
+        min_area_entry.delete(0, tk.END)
+        min_area_entry.insert(0, str(int(float(val))))
+        globals()["min_contour_area"] = int(float(val))
+        status_bar.config(text=f"最小变化区域已设置为: {int(float(val))} 像素")
     
-    frame_rate_scale = tk.Scale(frame_rate_frame, from_=1, to=120, orient=tk.HORIZONTAL, length=200,
-                                command=lambda val: globals().update(frame_rate=int(val)))
-    frame_rate_scale.set(30)  # 默认值为30
-    frame_rate_scale.pack(side=tk.LEFT, fill=tk.X, expand=True)
+    frame_rate_scale.config(command=on_frame_rate_scale)
+    threshold_scale.config(command=on_threshold_scale)
+    min_area_scale.config(command=on_min_area_scale)
     
-    frame_rate_entry = tk.Entry(frame_rate_frame, width=5)
-    frame_rate_entry.insert(0, "30")  # 默认值为30
-    frame_rate_entry.pack(side=tk.LEFT, padx=5)
+    def on_frame_rate_entry(event):
+        try:
+            value = int(frame_rate_entry.get())
+            if 1 <= value <= 120:
+                frame_rate_scale.set(value)
+                globals()["frame_rate"] = value
+                status_bar.config(text=f"帧率已设置为: {value} FPS")
+        except ValueError:
+            pass
     
-    def update_frame_rate_from_entry():
+    def on_threshold_entry(event):
+        try:
+            value = int(threshold_entry.get())
+            if 1 <= value <= 100:
+                threshold_scale.set(value)
+                globals()["threshold"] = value
+                status_bar.config(text=f"变化检测阈值已设置为: {value}")
+        except ValueError:
+            pass
+    
+    def on_min_area_entry(event):
+        try:
+            value = int(min_area_entry.get())
+            if 1 <= value <= 1000:
+                min_area_scale.set(value)
+                globals()["min_contour_area"] = value
+                status_bar.config(text=f"最小变化区域已设置为: {value} 像素")
+        except ValueError:
+            pass
+    
+    frame_rate_entry.bind("<Return>", on_frame_rate_entry)
+    threshold_entry.bind("<Return>", on_threshold_entry)
+    min_area_entry.bind("<Return>", on_min_area_entry)        
+
+    # 复选框设置
+    lock_aspect_var = tk.BooleanVar(value=lock_aspect_ratio)
+    tk.Checkbutton(
+        settings_frame, 
+        text="保持比例", 
+        variable=lock_aspect_var,
+        command=lambda: globals().update(lock_aspect_ratio=lock_aspect_var.get())
+    ).grid(row=len(params), column=0, padx=2, pady=2, sticky="w")
+    
+    tk.Checkbutton(
+        settings_frame,
+        text="总是置顶",
+        command=lambda: root.attributes('-topmost', not root.attributes('-topmost'))
+    ).grid(row=len(params), column=1, padx=2, pady=2, sticky="w")
+    
+    # 配置列权重
+    settings_frame.columnconfigure(1, weight=1)
+    control_panel.columnconfigure(0, weight=1)
+    
+    # 更新函数
+    def update_frame_rate():
         try:
             value = int(frame_rate_entry.get())
             if 1 <= value <= 120:
@@ -610,32 +872,7 @@ def create_control_panel():
         except ValueError:
             pass
     
-    def update_frame_rate_from_scale(val):
-        frame_rate_entry.delete(0, tk.END)
-        frame_rate_entry.insert(0, str(val))
-        globals().update(frame_rate=int(val))
-        status_bar.config(text=f"帧率已设置为: {val} FPS")
-    
-    frame_rate_scale.config(command=update_frame_rate_from_scale)
-    frame_rate_entry.bind("<Return>", lambda event: update_frame_rate_from_entry())
-    
-    # 变化检测阈值调整
-    threshold_frame = tk.Frame(settings_frame)
-    threshold_frame.pack(fill=tk.X, pady=5)
-    
-    threshold_label = tk.Label(threshold_frame, text="变化检测阈值:")
-    threshold_label.pack(side=tk.LEFT)
-    
-    threshold_scale = tk.Scale(threshold_frame, from_=1, to=100, orient=tk.HORIZONTAL, length=200,
-                               command=lambda val: globals().update(threshold=int(val)))
-    threshold_scale.set(threshold)
-    threshold_scale.pack(side=tk.LEFT, fill=tk.X, expand=True)
-    
-    threshold_entry = tk.Entry(threshold_frame, width=5)
-    threshold_entry.insert(0, str(threshold))
-    threshold_entry.pack(side=tk.LEFT, padx=5)
-    
-    def update_threshold_from_entry():
+    def update_threshold():
         try:
             value = int(threshold_entry.get())
             if 1 <= value <= 100:
@@ -645,32 +882,7 @@ def create_control_panel():
         except ValueError:
             pass
     
-    def update_threshold_from_scale(val):
-        threshold_entry.delete(0, tk.END)
-        threshold_entry.insert(0, str(val))
-        globals().update(threshold=int(val))
-        status_bar.config(text=f"变化检测阈值已设置为: {val}")
-    
-    threshold_scale.config(command=update_threshold_from_scale)
-    threshold_entry.bind("<Return>", lambda event: update_threshold_from_entry())
-    
-    # 最小变化区域调整
-    min_area_frame = tk.Frame(settings_frame)
-    min_area_frame.pack(fill=tk.X, pady=5)
-    
-    min_area_label = tk.Label(min_area_frame, text="最小变化区域:")
-    min_area_label.pack(side=tk.LEFT)
-    
-    min_area_scale = tk.Scale(min_area_frame, from_=1, to=1000, orient=tk.HORIZONTAL, length=200,
-                              command=lambda val: globals().update(min_contour_area=int(val)))
-    min_area_scale.set(min_contour_area)
-    min_area_scale.pack(side=tk.LEFT, fill=tk.X, expand=True)
-    
-    min_area_entry = tk.Entry(min_area_frame, width=5)
-    min_area_entry.insert(0, str(min_contour_area))
-    min_area_entry.pack(side=tk.LEFT, padx=5)
-    
-    def update_min_area_from_entry():
+    def update_min_area():
         try:
             value = int(min_area_entry.get())
             if 1 <= value <= 5000:
@@ -680,36 +892,23 @@ def create_control_panel():
         except ValueError:
             pass
     
-    def update_min_area_from_scale(val):
+    # 修正后的滑块回调函数
+    def on_frame_rate_scale(val):
+        frame_rate_entry.delete(0, tk.END)
+        frame_rate_entry.insert(0, str(int(float(val))))
+        globals().update(frame_rate=int(float(val)))
+    
+    def on_threshold_scale(val):
+        threshold_entry.delete(0, tk.END)
+        threshold_entry.insert(0, str(int(float(val))))
+        globals().update(threshold=int(float(val)))
+    
+    def on_min_area_scale(val):
         min_area_entry.delete(0, tk.END)
-        min_area_entry.insert(0, str(val))
-        globals().update(min_contour_area=int(val))
-        status_bar.config(text=f"最小变化区域已设置为: {val} 像素")
+        min_area_entry.insert(0, str(int(float(val))))
+        globals().update(min_contour_area=int(float(val)))
     
-    min_area_scale.config(command=update_min_area_from_scale)
-    min_area_entry.bind("<Return>", lambda event: update_min_area_from_entry())
     
-    # 创建复选框框架
-    checkbox_frame = tk.Frame(settings_frame)
-    checkbox_frame.pack(anchor='w', pady=5)  # 左对齐
-    
-    # 锁定宽高比复选框
-    lock_aspect_check = tk.Checkbutton(
-        checkbox_frame, 
-        text="保持图像比例", 
-        variable=tk.BooleanVar(value=lock_aspect_ratio),
-        command=lambda: globals().update(lock_aspect_ratio=not lock_aspect_ratio)
-    )
-    lock_aspect_check.pack(side=tk.LEFT, padx=5)
-    lock_aspect_check.select()  # 默认选中
-
-    # 新增：总是置顶复选框
-    always_on_top_check = tk.Checkbutton(
-        checkbox_frame,
-        text="总是置顶",
-        command=lambda: root.attributes('-topmost', not root.attributes('-topmost'))
-    )
-    always_on_top_check.pack(side=tk.LEFT, padx=5)
 
 # 创建控制面板
 create_control_panel()
