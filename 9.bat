@@ -1,0 +1,1 @@
+pyinstaller -F -w real_time_detection.py
