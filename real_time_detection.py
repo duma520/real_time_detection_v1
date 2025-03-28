@@ -8,9 +8,292 @@ import win32gui
 import win32process
 import psutil
 import time
+import platform
+import sys
+import subprocess
+from typing import Optional, Dict, Any, Tuple
+import importlib
+from abc import ABC, abstractmethod
+
+# ==================== 加速后端实现 ====================
+
+class AccelerationBackend(ABC):
+    """加速后端抽象基类"""
+    def __init__(self):
+        self.name = "CPU"
+        self.initialized = False
+        self.backend_info = {}
+    
+    @abstractmethod
+    def initialize(self) -> bool:
+        """初始化加速后端"""
+        pass
+    
+    @abstractmethod
+    def process_frames(self, frame1: np.ndarray, frame2: np.ndarray, threshold: int) -> np.ndarray:
+        """处理帧并返回阈值化差异图像"""
+        pass
+    
+    @abstractmethod
+    def release(self):
+        """释放资源"""
+        pass
+    
+    def get_info(self) -> Dict[str, Any]:
+        """获取后端信息"""
+        return self.backend_info
+
+class CUDABackend(AccelerationBackend):
+    """使用OpenCV CUDA加速"""
+    def __init__(self):
+        super().__init__()
+        self.name = "CUDA"
+        self.stream: Optional[cv2.cuda_Stream] = None
+        self.gpu_frame1: Optional[cv2.cuda_GpuMat] = None
+        self.gpu_frame2: Optional[cv2.cuda_GpuMat] = None
+    
+    def initialize(self) -> bool:
+        try:
+            if cv2.cuda.getCudaEnabledDeviceCount() == 0:
+                return False
+            
+            self.stream = cv2.cuda_Stream()
+            self.gpu_frame1 = cv2.cuda_GpuMat()
+            self.gpu_frame2 = cv2.cuda_GpuMat()
+            self.backend_info["cuda_devices"] = cv2.cuda.getCudaEnabledDeviceCount()
+            self.initialized = True
+            return True
+        except:
+            return False
+    
+    def process_frames(self, frame1: np.ndarray, frame2: np.ndarray, threshold: int) -> np.ndarray:
+        if not self.initialized or self.stream is None:
+            return super().process_frames(frame1, frame2, threshold)
+        
+        try:
+            self.gpu_frame1.upload(frame1, self.stream)
+            self.gpu_frame2.upload(frame2, self.stream)
+            
+            gpu_gray1 = cv2.cuda.cvtColor(self.gpu_frame1, cv2.COLOR_BGR2GRAY, stream=self.stream)
+            gpu_gray2 = cv2.cuda.cvtColor(self.gpu_frame2, cv2.COLOR_BGR2GRAY, stream=self.stream)
+            
+            gpu_diff = cv2.cuda.absdiff(gpu_gray1, gpu_gray2, stream=self.stream)
+            _, gpu_thresh = cv2.cuda.threshold(gpu_diff, threshold, 255, cv2.THRESH_BINARY, stream=self.stream)
+            
+            thresh = gpu_thresh.download(stream=self.stream)
+            self.stream.waitForCompletion()
+            return thresh
+        except:
+            self.initialized = False
+            return super().process_frames(frame1, frame2, threshold)
+    
+    def release(self):
+        if self.stream is not None:
+            self.stream = None
+        self.gpu_frame1 = None
+        self.gpu_frame2 = None
+
+class OpenCLBackend(AccelerationBackend):
+    """使用OpenCL加速"""
+    def __init__(self):
+        super().__init__()
+        self.name = "OpenCL"
+    
+    def initialize(self) -> bool:
+        try:
+            if not cv2.ocl.haveOpenCL():
+                return False
+            
+            cv2.ocl.setUseOpenCL(True)
+            if not cv2.ocl.useOpenCL():
+                return False
+            
+            self.backend_info["opencl_available"] = True
+            self.initialized = True
+            return True
+        except:
+            return False
+    
+    def process_frames(self, frame1: np.ndarray, frame2: np.ndarray, threshold: int) -> np.ndarray:
+        if not self.initialized:
+            return super().process_frames(frame1, frame2, threshold)
+        
+        try:
+            umat1 = cv2.UMat(frame1)
+            umat2 = cv2.UMat(frame2)
+            
+            gray1 = cv2.cvtColor(umat1, cv2.COLOR_BGR2GRAY)
+            gray2 = cv2.cvtColor(umat2, cv2.COLOR_BGR2GRAY)
+            
+            diff = cv2.absdiff(gray1, gray2)
+            _, thresh = cv2.threshold(diff, threshold, 255, cv2.THRESH_BINARY)
+            
+            return cv2.UMat.get(thresh) if isinstance(thresh, cv2.UMat) else thresh
+        except:
+            self.initialized = False
+            return super().process_frames(frame1, frame2, threshold)
+    
+    def release(self):
+        """释放OpenCL资源"""
+        cv2.ocl.setUseOpenCL(False)
+        self.initialized = False
+
+class NumbaBackend(AccelerationBackend):
+    """使用Numba JIT编译加速"""
+    def __init__(self):
+        super().__init__()
+        self.name = "Numba"
+        
+    def initialize(self) -> bool:
+        try:
+            import numba
+            from numba import jit
+            self.backend_info["numba_version"] = numba.__version__
+            
+            @jit(nopython=True, nogil=True)
+            def numba_process(frame1, frame2, threshold):
+                diff = np.abs(frame1.astype(np.int16) - frame2.astype(np.int16))
+                return (diff > threshold).astype(np.uint8) * 255
+            
+            self._numba_process = numba_process
+            self.initialized = True
+            return True
+        except Exception as e:
+            print(f"Numba初始化失败: {str(e)}")
+            return False
+    
+    def process_frames(self, frame1: np.ndarray, frame2: np.ndarray, threshold: int) -> np.ndarray:
+        if not self.initialized:
+            return super().process_frames(frame1, frame2, threshold)
+        
+        try:
+            gray1 = cv2.cvtColor(frame1, cv2.COLOR_BGR2GRAY)
+            gray2 = cv2.cvtColor(frame2, cv2.COLOR_BGR2GRAY)
+            return self._numba_process(gray1, gray2, threshold)
+        except:
+            self.initialized = False
+            return super().process_frames(frame1, frame2, threshold)
+    
+    def release(self):
+        pass
+
+class PyTorchBackend(AccelerationBackend):
+    """使用PyTorch GPU加速"""
+    def __init__(self):
+        super().__init__()
+        self.name = "PyTorch"
+        self.device = None
+    
+    def initialize(self) -> bool:
+        try:
+            import torch
+            self.backend_info["torch_version"] = torch.__version__
+            
+            self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+            if self.device.type == 'cpu':
+                return False
+                
+            self.initialized = True
+            return True
+        except Exception as e:
+            print(f"PyTorch初始化失败: {str(e)}")
+            return False
+    
+    def process_frames(self, frame1: np.ndarray, frame2: np.ndarray, threshold: int) -> np.ndarray:
+        if not self.initialized or self.device is None:
+            return super().process_frames(frame1, frame2, threshold)
+        
+        try:
+            import torch
+            tensor1 = torch.from_numpy(frame1).permute(2, 0, 1).float().to(self.device)
+            tensor2 = torch.from_numpy(frame2).permute(2, 0, 1).float().to(self.device)
+            
+            gray1 = (0.299 * tensor1[0] + 0.587 * tensor1[1] + 0.114 * tensor1[2]).to(torch.uint8)
+            gray2 = (0.299 * tensor2[0] + 0.587 * tensor2[1] + 0.114 * tensor2[2]).to(torch.uint8)
+            
+            diff = torch.abs(gray1.int() - gray2.int())
+            thresh = (diff > threshold).to(torch.uint8) * 255
+            
+            return thresh.cpu().numpy()
+        except Exception as e:
+            print(f"PyTorch处理失败: {str(e)}")
+            self.initialized = False
+            return super().process_frames(frame1, frame2, threshold)
+    
+    def release(self):
+        if hasattr(self, 'device'):
+            import torch
+            torch.cuda.empty_cache()
+
+class CPUBackend(AccelerationBackend):
+    """CPU后备方案"""
+    def __init__(self):
+        super().__init__()
+        self.name = "CPU"
+    
+    def initialize(self) -> bool:
+        self.initialized = True
+        return True
+    
+    def process_frames(self, frame1: np.ndarray, frame2: np.ndarray, threshold: int) -> np.ndarray:
+        gray1 = cv2.cvtColor(frame1, cv2.COLOR_BGR2GRAY)
+        gray2 = cv2.cvtColor(frame2, cv2.COLOR_BGR2GRAY)
+        frame_diff = cv2.absdiff(gray1, gray2)
+        _, thresh = cv2.threshold(frame_diff, threshold, 255, cv2.THRESH_BINARY)
+        return thresh
+    
+    def release(self):
+        pass
+
+class AccelerationManager:
+    """加速后端管理器"""
+    def __init__(self):
+        self.backends = [
+            CUDABackend(),
+            OpenCLBackend(),
+            NumbaBackend(),
+            PyTorchBackend(),
+            CPUBackend()  # 最后一个是CPU后备
+        ]
+        self.current_backend: Optional[AccelerationBackend] = None
+    
+    def detect_best_backend(self) -> AccelerationBackend:
+        """检测并返回最佳可用的加速后端"""
+        for backend in self.backends:
+            if backend.initialize():
+                print(f"检测到加速后端: {backend.name}")
+                print(f"后端信息: {backend.get_info()}")
+                return backend
+        print("未检测到加速后端，使用CPU")
+        return self.backends[-1]  # 返回CPU后端
+    
+    def set_backend(self, backend_name: str) -> bool:
+        """设置特定的加速后端"""
+        for backend in self.backends:
+            if backend.name.lower() == backend_name.lower():
+                if backend.initialize():
+                    if self.current_backend:
+                        self.current_backend.release()
+                    self.current_backend = backend
+                    return True
+        return False
+    
+    def get_current_backend(self) -> AccelerationBackend:
+        """获取当前加速后端"""
+        if self.current_backend is None:
+            self.current_backend = self.detect_best_backend()
+        return self.current_backend
+    
+    def release_all(self):
+        """释放所有后端资源"""
+        for backend in self.backends:
+            backend.release()
+        self.current_backend = None
+
+# ==================== 主程序 ====================
 
 # 全局变量
-version = "v61.20.12"  # 版本
+version = "v61.20.18"  # 版本
 author = "杜玛"
 copyrigh = "Copyright © 杜玛. All rights reserved."
 threshold = 30  # 变化检测阈值
@@ -30,32 +313,13 @@ cpu_monitor_enabled = True  # 是否启用CPU监控
 frame_count = 0  # 用于计数帧数
 last_boxes = []  # 存储上一帧的检测框
 fade_frames = 3  # 渐隐帧数，控制渐隐速度
-
-# 性能检测函数
-def detect_max_fps():
-    global max_recommended_fps, performance_test_done
-    test_duration = 2  # 测试2秒
-    start_time = time.time()
-    frame_count = 0
-    
-    # 模拟实际工作负载
-    test_frame = np.zeros((480, 640, 3), dtype=np.uint8)
-    while time.time() - start_time < test_duration:
-        # 模拟图像处理操作
-        gray = cv2.cvtColor(test_frame, cv2.COLOR_BGR2GRAY)
-        _ = cv2.absdiff(gray, gray)
-        frame_count += 1
-    
-    max_recommended_fps = min(360, max(30, frame_count // test_duration))
-    performance_test_done = True
-    return max_recommended_fps
-
+acceleration_manager = AccelerationManager()
 
 # 创建主窗口
 root = tk.Tk()
 root.after(100, lambda: (
     detect_max_fps(),
-    status_bar.config(text=f"系统检测: 推荐最大帧率 {max_recommended_fps}FPS")
+    status_bar.config(text=f"系统检测: 推荐最大帧率 {max_recommended_fps}FPS | 加速方式: {acceleration_manager.get_current_backend().name}")
 ))
 root.title(f"智能变化检测系统 ({version} | {author} | {copyrigh})")
 root.geometry("500x800")  # 设置窗口大小
@@ -482,6 +746,26 @@ def update_video_display(frame):
         image=current_image
     )
 
+# 性能检测函数
+def detect_max_fps():
+    global max_recommended_fps, performance_test_done
+    test_duration = 2  # 测试2秒
+    start_time = time.time()
+    frame_count = 0
+    
+    # 模拟实际工作负载
+    test_frame = np.zeros((480, 640, 3), dtype=np.uint8)
+    backend = acceleration_manager.get_current_backend()
+    
+    while time.time() - start_time < test_duration:
+        # 使用当前加速后端处理
+        _ = backend.process_frames(test_frame, test_frame, threshold)
+        frame_count += 1
+    
+    max_recommended_fps = min(360, max(30, frame_count // test_duration))
+    performance_test_done = True
+    return max_recommended_fps
+
 # 定义更新帧的函数
 def update_frame():
     global last_boxes
@@ -493,8 +777,6 @@ def update_frame():
     start_time = time.time()
     frame_count += 1
     current_time = time.time()
-
-
 
     # CPU占用监控（每10帧检测一次）
     if cpu_monitor_enabled and monitoring_process and frame_count % 10 == 0:
@@ -511,7 +793,6 @@ def update_frame():
     if last_update_time:
         actual_fps = 0.9 * actual_fps + 0.1 * (1 / (current_time - last_update_time))  # 平滑处理
     last_update_time = current_time
-
 
     if monitoring_camera is not None:
         # 摄像头模式
@@ -560,9 +841,6 @@ def update_frame():
             # 读取两帧用于比较
             current_frame = np.array(sct.grab(monitor_area))
             current_frame = cv2.cvtColor(current_frame, cv2.COLOR_BGRA2BGR)
-
-            # 添加微小延迟（允许其他线程运行）
-            # time.sleep(0.001)
             
             next_frame = np.array(sct.grab(monitor_area))
             next_frame = cv2.cvtColor(next_frame, cv2.COLOR_BGRA2BGR)
@@ -578,10 +856,8 @@ def update_frame():
             return
     else:
         # 没有选择监控源
-        # 显示黑色图像
         current_frame = np.zeros((480, 640, 3), dtype=np.uint8)
         try:
-            # 尝试使用PIL绘制中文
             from PIL import Image, ImageDraw, ImageFont
             img_pil = Image.fromarray(current_frame)
             draw = ImageDraw.Draw(img_pil)
@@ -592,7 +868,6 @@ def update_frame():
             draw.text((100, 280), "2. 或选择监控摄像头", font=font, fill=(255, 255, 255))
             current_frame = np.array(img_pil)
         except:
-            # 如果中文显示失败，回退到英文
             cv2.putText(current_frame, "Please select source", (150, 220), 
                        cv2.FONT_HERSHEY_SIMPLEX, 1.0, (255, 255, 255), 2)
             cv2.putText(current_frame, "1. Click button to monitor process", (50, 260), 
@@ -603,23 +878,27 @@ def update_frame():
         root.after(30, update_frame)
         return
 
-
-    # 转换为灰度图
-    current_gray = cv2.cvtColor(current_frame, cv2.COLOR_BGR2GRAY)
-    next_gray = cv2.cvtColor(next_frame, cv2.COLOR_BGR2GRAY)
-
-    # 计算帧间差异
-    frame_diff = cv2.absdiff(current_gray, next_gray)
-
-    # 二值化差异图像
-    _, thresh = cv2.threshold(frame_diff, threshold, 255, cv2.THRESH_BINARY)
+    # 使用当前加速后端处理帧
+    backend = acceleration_manager.get_current_backend()
+    try:
+        thresh = backend.process_frames(current_frame, next_frame, threshold)
+        # 确保 thresh 是 uint8 类型
+        if thresh.dtype != np.uint8:
+            thresh = thresh.astype(np.uint8)
+    except Exception as e:
+        print(f"{backend.name}处理失败: {str(e)}，回退到CPU")
+        acceleration_manager.set_backend("CPU")
+        backend = acceleration_manager.get_current_backend()
+        thresh = backend.process_frames(current_frame, next_frame, threshold)
+        # 确保 thresh 是 uint8 类型
+        if thresh.dtype != np.uint8:
+            thresh = thresh.astype(np.uint8)
 
     # 查找轮廓
     contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     
     # 创建副本帧用于绘制
     display_frame = current_frame.copy()
-
 
     # 在原始帧上绘制轮廓
     for contour in contours:
@@ -635,42 +914,31 @@ def update_frame():
             current_boxes.append((x, y, w, h))
             cv2.rectangle(display_frame, (x, y), (x+w, y+h), (0, 255, 0), 2)
     
-    # 渐隐旧框，绘制上一帧的框（渐隐黄色）
+    # 渐隐旧框
     for i, (x, y, w, h) in enumerate(last_boxes):
         if (x, y, w, h) not in current_boxes:
-            alpha = i / fade_frames  # 透明度衰减
-            # alpha = 0.3 * (fade_frames - i) / fade_frames
-            color = (0, int(255*alpha), 255)  # 黄->绿渐变
+            alpha = i / fade_frames
+            color = (0, int(255*alpha), 255)
             cv2.rectangle(display_frame, (x, y), (x+w, y+h), color, 1)
-            # if alpha > 0:
-            #     overlay = display_frame.copy()
-            #     cv2.rectangle(overlay, (x, y), (x+w, y+h), (0, 255, 255), 1)
-            #     cv2.addWeighted(overlay, alpha, display_frame, 1-alpha, 0, display_frame)
 
-    last_boxes = current_boxes[-10:]  # 保留最近10个框
- 
-
+    last_boxes = current_boxes[-10:]
 
     # 更新视频显示
     update_video_display(current_frame)
 
-    # 显示最终完成的帧 改成这个会不显示变化
-    # update_video_display(display_frame)  # 而不是直接使用current_frame
-
-
     # 计算实际帧率
     current_time = time.time()
     if last_update_time:
-        actual_fps = 0.9 * actual_fps + 0.1 * (1 / (current_time - last_update_time))  # 平滑处理
+        actual_fps = 0.9 * actual_fps + 0.1 * (1 / (current_time - last_update_time))
     last_update_time = current_time
 
     # 构建状态栏文本
-    status_text = f"运行中: {actual_fps:.1f}FPS"
+    backend = acceleration_manager.get_current_backend()
+    status_text = f"运行中: {actual_fps:.1f}FPS | 加速: {backend.name}"
     if frame_rate > 120 or abs(actual_fps - frame_rate) > 10:
         status_text += f" (设置: {frame_rate}FPS)"
         status_bar.config(fg="red")
     
-    # CPU状态提示（需确保前面已计算cpu_percent）
     if 'cpu_percent' in locals() and cpu_percent > 80:
         status_text += f" | CPU: {cpu_percent}% ⚠️ CPU过载"
         status_bar.config(fg="red")
@@ -679,34 +947,12 @@ def update_frame():
     
     status_bar.config(text=status_text)
 
-    # 帧率防护
-    # 硬性限制不超过360FPS，同时防止除零错误
-    effective_fps = min(frame_rate, 360) # 硬性上限
-    delay = max(1, int(1000 / effective_fps))  # 计算延迟时间(ms)
+    # 帧率控制
+    effective_fps = min(frame_rate, 360)
+    delay = max(1, int(1000 / effective_fps))
     root.after(delay, update_frame)
 
-    # 性能提示
-    cpu_warning_threshold = 120  # 警告阈值
-    if frame_rate > cpu_warning_threshold:
-        status_bar.config(
-            text=f"高负载警告: {frame_rate}FPS | 推荐不超过{max_recommended_fps}FPS",
-            fg="red"
-        )
-    elif not monitoring_process and not monitoring_camera:
-        status_bar.config(text="就绪: 请选择监控源", fg="black")
-
-
-    # 高帧率警告（状态栏提示）
-    if frame_rate > 120:
-        status_bar.config(
-            text=f"高帧率警告：当前 {frame_rate}FPS (延迟 {delay}ms)",
-            fg="red"
-        )
-
-    # 递归调用，根据设置的帧率调整更新间隔
-    # root.after(delay, update_frame)
-
-# 创建控制面板内容
+# 创建控制面板（添加加速后端选择）
 def create_control_panel():
     global frame_rate_scale, threshold_scale, min_area_scale
     global frame_rate_entry, threshold_entry, min_area_entry
@@ -842,6 +1088,34 @@ def create_control_panel():
     threshold_entry.bind("<Return>", on_threshold_entry)
     min_area_entry.bind("<Return>", on_min_area_entry)        
 
+    # 加速后端选择区域
+    accel_frame = tk.LabelFrame(control_panel, text="加速设置", padx=5, pady=5)
+    accel_frame.grid(row=2, column=0, sticky="ew", pady=(5, 0))
+    
+    tk.Label(accel_frame, text="加速后端:").grid(row=0, column=0, padx=2, pady=2, sticky="e")
+    
+    backend_var = tk.StringVar()
+    backend_menu = ttk.Combobox(accel_frame, textvariable=backend_var, state="readonly")
+    backend_menu['values'] = [backend.name for backend in acceleration_manager.backends]
+    backend_menu.current([backend.name for backend in acceleration_manager.backends].index(
+        acceleration_manager.get_current_backend().name))
+    backend_menu.grid(row=0, column=1, padx=2, pady=2, sticky="ew")
+    
+    def on_backend_change(event):
+        selected_backend = backend_var.get()
+        if acceleration_manager.set_backend(selected_backend):
+            status_bar.config(text=f"已切换到 {selected_backend} 加速")
+            # 重新检测最大帧率
+            detect_max_fps()
+            # 更新帧率滑块上限
+            frame_rate_scale.config(to=max_recommended_fps if performance_test_done else 360)
+        else:
+            status_bar.config(text=f"无法切换到 {selected_backend}，使用当前后端", fg="red")
+            backend_menu.current([backend.name for backend in acceleration_manager.backends].index(
+                acceleration_manager.get_current_backend().name))
+    
+    backend_menu.bind("<<ComboboxSelected>>", on_backend_change)
+    
     # 复选框设置
     lock_aspect_var = tk.BooleanVar(value=lock_aspect_ratio)
     tk.Checkbutton(
@@ -860,55 +1134,6 @@ def create_control_panel():
     # 配置列权重
     settings_frame.columnconfigure(1, weight=1)
     control_panel.columnconfigure(0, weight=1)
-    
-    # 更新函数
-    def update_frame_rate():
-        try:
-            value = int(frame_rate_entry.get())
-            if 1 <= value <= 120:
-                frame_rate_scale.set(value)
-                globals().update(frame_rate=value)
-                status_bar.config(text=f"帧率已设置为: {value} FPS")
-        except ValueError:
-            pass
-    
-    def update_threshold():
-        try:
-            value = int(threshold_entry.get())
-            if 1 <= value <= 100:
-                threshold_scale.set(value)
-                globals().update(threshold=value)
-                status_bar.config(text=f"变化检测阈值已设置为: {value}")
-        except ValueError:
-            pass
-    
-    def update_min_area():
-        try:
-            value = int(min_area_entry.get())
-            if 1 <= value <= 5000:
-                min_area_scale.set(value)
-                globals().update(min_contour_area=value)
-                status_bar.config(text=f"最小变化区域已设置为: {value} 像素")
-        except ValueError:
-            pass
-    
-    # 修正后的滑块回调函数
-    def on_frame_rate_scale(val):
-        frame_rate_entry.delete(0, tk.END)
-        frame_rate_entry.insert(0, str(int(float(val))))
-        globals().update(frame_rate=int(float(val)))
-    
-    def on_threshold_scale(val):
-        threshold_entry.delete(0, tk.END)
-        threshold_entry.insert(0, str(int(float(val))))
-        globals().update(threshold=int(float(val)))
-    
-    def on_min_area_scale(val):
-        min_area_entry.delete(0, tk.END)
-        min_area_entry.insert(0, str(int(float(val))))
-        globals().update(min_contour_area=int(float(val)))
-    
-    
 
 # 创建控制面板
 create_control_panel()
@@ -922,3 +1147,4 @@ root.mainloop()
 # 释放资源
 if monitoring_camera is not None:
     cv2.VideoCapture(monitoring_camera).release()
+acceleration_manager.release_all()
