@@ -14,6 +14,10 @@ import subprocess
 from typing import Optional, Dict, Any, Tuple
 import importlib
 from abc import ABC, abstractmethod
+import threading
+import queue
+from queue import Queue
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # ==================== 加速后端实现 ====================
 
@@ -290,10 +294,61 @@ class AccelerationManager:
             backend.release()
         self.current_backend = None
 
+# ==================== 多线程处理类 ====================
+
+class FrameProcessor:
+    def __init__(self):
+        self.executor = ThreadPoolExecutor(max_workers=4)  # 4核线程池
+        self.frame_queue = Queue(maxsize=10)  # 限制队列大小防止内存溢出
+        self.result_queue = Queue(maxsize=10)
+        self.running = True
+        
+    def process_frame_task(self, frame1, frame2, threshold, backend):
+        """线程任务函数"""
+        try:
+            thresh = backend.process_frames(frame1, frame2, threshold)
+            return thresh
+        except Exception as e:
+            print(f"线程处理失败: {e}")
+            return None
+    
+    def start_processing(self, threshold, backend):
+        """启动处理线程"""
+        def worker():
+            while self.running:
+                try:
+                    frame1, frame2 = self.frame_queue.get(timeout=0.1)
+                    try:
+                        future = self.executor.submit(
+                            self.process_frame_task, 
+                            frame1, frame2, threshold, backend
+                        )
+                        self.result_queue.put(future, timeout=0.1)
+                    except Exception as e:
+                        print(f"任务提交失败: {str(e)}")
+                        # 将帧重新放回队列以便重试
+                        self.frame_queue.put((frame1, frame2))
+                except queue.Empty:
+                    continue
+                except Exception as e:
+                    if self.running:
+                        print(f"工作线程错误: {str(e)} - {type(e).__name__}")
+                    continue
+        
+        self.worker_thread = threading.Thread(target=worker, daemon=True)
+        self.worker_thread.start()
+    
+    def stop_processing(self):
+        """停止处理线程"""
+        self.running = False
+        self.executor.shutdown(wait=True)
+        if self.worker_thread.is_alive():
+            self.worker_thread.join()
+
 # ==================== 主程序 ====================
 
 # 全局变量
-version = "v61.20.18"  # 版本
+version = "v70.1.8"  # 版本
 author = "杜玛"
 copyrigh = "Copyright © 杜玛. All rights reserved."
 threshold = 30  # 变化检测阈值
@@ -314,6 +369,7 @@ frame_count = 0  # 用于计数帧数
 last_boxes = []  # 存储上一帧的检测框
 fade_frames = 3  # 渐隐帧数，控制渐隐速度
 acceleration_manager = AccelerationManager()
+frame_processor = FrameProcessor()  # 多线程处理器
 
 # 创建主窗口
 root = tk.Tk()
@@ -878,22 +934,28 @@ def update_frame():
         root.after(30, update_frame)
         return
 
-    # 使用当前加速后端处理帧
+    # 使用多线程处理帧
     backend = acceleration_manager.get_current_backend()
-    try:
-        thresh = backend.process_frames(current_frame, next_frame, threshold)
-        # 确保 thresh 是 uint8 类型
-        if thresh.dtype != np.uint8:
-            thresh = thresh.astype(np.uint8)
-    except Exception as e:
-        print(f"{backend.name}处理失败: {str(e)}，回退到CPU")
-        acceleration_manager.set_backend("CPU")
-        backend = acceleration_manager.get_current_backend()
-        thresh = backend.process_frames(current_frame, next_frame, threshold)
-        # 确保 thresh 是 uint8 类型
-        if thresh.dtype != np.uint8:
-            thresh = thresh.astype(np.uint8)
+    # 默认使用单线程处理
+    thresh = backend.process_frames(current_frame, next_frame, threshold)
 
+    try:
+        # 将帧放入队列
+        frame_processor.frame_queue.put((current_frame, next_frame))
+        
+        # 检查结果队列
+        if not frame_processor.result_queue.empty():
+            future = frame_processor.result_queue.get()
+            new_thresh = future.result()
+            if new_thresh is not None:
+                # 确保 thresh 是 uint8 类型
+                if new_thresh.dtype != np.uint8:
+                    new_thresh = new_thresh.astype(np.uint8)
+                thresh = new_thresh  # 使用多线程处理结果
+    except Exception as e:
+        print(f"多线程处理失败: {str(e)}，使用单线程结果")
+
+    
     # 查找轮廓
     contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     
@@ -1138,6 +1200,9 @@ def create_control_panel():
 # 创建控制面板
 create_control_panel()
 
+# 启动多线程处理器
+frame_processor.start_processing(threshold, acceleration_manager.get_current_backend())
+
 # 启动更新帧的函数
 update_frame()
 
@@ -1148,3 +1213,4 @@ root.mainloop()
 if monitoring_camera is not None:
     cv2.VideoCapture(monitoring_camera).release()
 acceleration_manager.release_all()
+frame_processor.stop_processing()
