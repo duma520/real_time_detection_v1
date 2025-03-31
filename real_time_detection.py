@@ -1,3 +1,4 @@
+import collections
 import cv2
 import tkinter as tk
 from tkinter import ttk, messagebox
@@ -187,24 +188,39 @@ class PyTorchBackend(AccelerationBackend):
         super().__init__()
         self.name = "PyTorch"
         self.device = None
+        self._torch_available = False
     
     def initialize(self) -> bool:
         try:
             import torch
+            self._torch_available = True
             self.backend_info["torch_version"] = torch.__version__
             
-            self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-            if self.device.type == 'cpu':
+            # 添加更详细的错误处理
+            if not torch.cuda.is_available():
+                print("PyTorch CUDA不可用，将使用CPU模式")
+                self.device = torch.device('cpu')
                 return False
-                
-            self.initialized = True
-            return True
+            
+            try:
+                self.device = torch.device('cuda')
+                # 测试CUDA是否真的可用
+                test_tensor = torch.tensor([1.0]).cuda()
+                self.initialized = True
+                return True
+            except Exception as e:
+                print(f"PyTorch CUDA测试失败: {str(e)}")
+                self.device = torch.device('cpu')
+                return False
+            
         except Exception as e:
             print(f"PyTorch初始化失败: {str(e)}")
+            self._torch_available = False
             return False
+
     
     def process_frames(self, frame1: np.ndarray, frame2: np.ndarray, threshold: int) -> np.ndarray:
-        if not self.initialized or self.device is None:
+        if not self._torch_available or not self.initialized or self.device is None:
             return super().process_frames(frame1, frame2, threshold)
         
         try:
@@ -256,8 +272,8 @@ class AccelerationManager:
             CUDABackend(),
             OpenCLBackend(),
             NumbaBackend(),
-            PyTorchBackend(),
-            CPUBackend()  # 最后一个是CPU后备
+            CPUBackend(),  # 最后一个是CPU后备
+            PyTorchBackend()
         ]
         self.current_backend: Optional[AccelerationBackend] = None
     
@@ -294,6 +310,197 @@ class AccelerationManager:
             backend.release()
         self.current_backend = None
 
+# ==================== 算法优化模块 ====================
+class AlgorithmManager:
+    """算法管理器，提供多种处理算法和组合"""
+    
+    def __init__(self):
+        self.current_algorithm = "原始设置"  # 默认使用原始算法
+        self.available_algorithms = {
+            "原始设置": self.original_algorithm,
+            "高斯模糊预处理": self.gaussian_blur_algorithm,
+            "背景减除算法": self.background_subtraction_algorithm,
+            "形态学处理": self.morphological_algorithm,
+            "光流法优化": self.optical_flow_algorithm,
+            "帧差分优化": self.frame_diff_enhanced_algorithm,
+            "多尺度检测": self.multi_scale_algorithm
+        }
+        
+        # 预定义的算法组合
+        self.algorithm_presets = {
+            "快速检测组合": ["高斯模糊预处理", "帧差分优化"],
+            "精确检测组合": ["背景减除算法", "形态学处理"],
+            "运动追踪组合": ["光流法优化", "多尺度检测"],
+            "智能组合": []  # 动态选择
+        }
+        
+        # 背景减除器
+        self.backSub = cv2.createBackgroundSubtractorMOG2(history=500, varThreshold=16, detectShadows=True)
+        
+        # 光流法参数
+        self.flow_params = dict(
+            pyr_scale=0.5,
+            levels=3,
+            winsize=15,
+            iterations=3,
+            poly_n=5,
+            poly_sigma=1.2,
+            flags=0
+        )
+        
+        # 智能组合缓存
+        self.smart_combo_cache = None
+        self.last_combo_time = 0
+    
+    def set_algorithm(self, algorithm_name: str):
+        """设置当前使用的算法"""
+        if algorithm_name in self.available_algorithms:
+            self.current_algorithm = algorithm_name
+            return True
+        return False
+    
+    def set_algorithm_combo(self, combo_name: str):
+        """设置算法组合"""
+        if combo_name in self.algorithm_presets:
+            self.current_algorithm = combo_name
+            return True
+        return False
+    
+    def smart_select_algorithm(self):
+        """智能选择最佳算法组合"""
+        current_time = time.time()
+        if self.smart_combo_cache and current_time - self.last_combo_time < 10:
+            return self.smart_combo_cache
+        
+        # 根据系统性能动态选择
+        cpu_load = psutil.cpu_percent()
+        mem_load = psutil.virtual_memory().percent
+        
+        if cpu_load > 70 or mem_load > 80:
+            combo = ["高斯模糊预处理", "帧差分优化"]  # 轻量级组合
+        else:
+            combo = ["背景减除算法", "形态学处理"]  # 精确组合
+        
+        self.smart_combo_cache = combo
+        self.last_combo_time = current_time
+        return combo
+    
+    def process_frame(self, frame1: np.ndarray, frame2: np.ndarray, threshold: int) -> np.ndarray:
+        """处理帧的核心方法"""
+        if self.current_algorithm == "智能组合":
+            combo = self.smart_select_algorithm()
+            result = frame1.copy()
+            for algo in combo:
+                result = self.available_algorithms[algo](result, frame2, threshold)
+            return result
+        elif self.current_algorithm in self.algorithm_presets:
+            combo = self.algorithm_presets[self.current_algorithm]
+            result = frame1.copy()
+            for algo in combo:
+                result = self.available_algorithms[algo](result, frame2, threshold)
+            return result
+        else:
+            return self.available_algorithms[self.current_algorithm](frame1, frame2, threshold)
+    
+    # ===== 基础算法实现 =====
+    def original_algorithm(self, frame1: np.ndarray, frame2: np.ndarray, threshold: int) -> np.ndarray:
+        """原始算法"""
+        gray1 = cv2.cvtColor(frame1, cv2.COLOR_BGR2GRAY)
+        gray2 = cv2.cvtColor(frame2, cv2.COLOR_BGR2GRAY)
+        frame_diff = cv2.absdiff(gray1, gray2)
+        _, thresh = cv2.threshold(frame_diff, threshold, 255, cv2.THRESH_BINARY)
+        return thresh
+    
+    def gaussian_blur_algorithm(self, frame1: np.ndarray, frame2: np.ndarray, threshold: int) -> np.ndarray:
+        """高斯模糊预处理"""
+        gray1 = cv2.cvtColor(frame1, cv2.COLOR_BGR2GRAY)
+        gray2 = cv2.cvtColor(frame2, cv2.COLOR_BGR2GRAY)
+        
+        # 应用高斯模糊
+        gray1 = cv2.GaussianBlur(gray1, (5, 5), 0)
+        gray2 = cv2.GaussianBlur(gray2, (5, 5), 0)
+        
+        frame_diff = cv2.absdiff(gray1, gray2)
+        _, thresh = cv2.threshold(frame_diff, threshold, 255, cv2.THRESH_BINARY)
+        return thresh
+    
+    def background_subtraction_algorithm(self, frame1: np.ndarray, frame2: np.ndarray, threshold: int) -> np.ndarray:
+        """背景减除算法"""
+        # 使用MOG2背景减除器
+        fg_mask = self.backSub.apply(frame2)
+        _, thresh = cv2.threshold(fg_mask, threshold, 255, cv2.THRESH_BINARY)
+        return thresh
+    
+    def morphological_algorithm(self, frame1: np.ndarray, frame2: np.ndarray, threshold: int) -> np.ndarray:
+        """形态学处理算法"""
+        gray1 = cv2.cvtColor(frame1, cv2.COLOR_BGR2GRAY)
+        gray2 = cv2.cvtColor(frame2, cv2.COLOR_BGR2GRAY)
+        frame_diff = cv2.absdiff(gray1, gray2)
+        _, thresh = cv2.threshold(frame_diff, threshold, 255, cv2.THRESH_BINARY)
+        
+        # 形态学操作
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+        thresh = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel)
+        thresh = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, kernel)
+        return thresh
+    
+    def optical_flow_algorithm(self, frame1: np.ndarray, frame2: np.ndarray, threshold: int) -> np.ndarray:
+        """光流法优化"""
+        gray1 = cv2.cvtColor(frame1, cv2.COLOR_BGR2GRAY)
+        gray2 = cv2.cvtColor(frame2, cv2.COLOR_BGR2GRAY)
+        
+        # 计算密集光流
+        flow = cv2.calcOpticalFlowFarneback(gray1, gray2, None, **self.flow_params)
+        
+        # 计算光流幅度
+        mag, _ = cv2.cartToPolar(flow[..., 0], flow[..., 1])
+        mag = cv2.normalize(mag, None, 0, 255, cv2.NORM_MINMAX)
+        _, thresh = cv2.threshold(mag, threshold, 255, cv2.THRESH_BINARY)
+        return thresh
+    
+    def frame_diff_enhanced_algorithm(self, frame1: np.ndarray, frame2: np.ndarray, threshold: int) -> np.ndarray:
+        """增强型帧差分算法"""
+        gray1 = cv2.cvtColor(frame1, cv2.COLOR_BGR2GRAY)
+        gray2 = cv2.cvtColor(frame2, cv2.COLOR_BGR2GRAY)
+        
+        # 加权差分
+        diff = cv2.absdiff(gray1, gray2)
+        diff = cv2.multiply(diff, 1.5)  # 增强差异
+        
+        _, thresh = cv2.threshold(diff, threshold, 255, cv2.THRESH_BINARY)
+        return thresh
+    
+    def multi_scale_algorithm(self, frame1: np.ndarray, frame2: np.ndarray, threshold: int) -> np.ndarray:
+        """多尺度检测算法"""
+        # 创建多尺度金字塔
+        scales = [1.0, 0.75, 0.5]
+        results = []
+        
+        for scale in scales:
+            if scale != 1.0:
+                resized1 = cv2.resize(frame1, None, fx=scale, fy=scale)
+                resized2 = cv2.resize(frame2, None, fx=scale, fy=scale)
+            else:
+                resized1 = frame1.copy()
+                resized2 = frame2.copy()
+                
+            gray1 = cv2.cvtColor(resized1, cv2.COLOR_BGR2GRAY)
+            gray2 = cv2.cvtColor(resized2, cv2.COLOR_BGR2GRAY)
+            diff = cv2.absdiff(gray1, gray2)
+            _, thresh = cv2.threshold(diff, threshold, 255, cv2.THRESH_BINARY)
+            
+            if scale != 1.0:
+                thresh = cv2.resize(thresh, (frame1.shape[1], frame1.shape[0]))
+            
+            results.append(thresh)
+        
+        # 合并多尺度结果
+        final_thresh = np.zeros_like(results[0])
+        for thresh in results:
+            final_thresh = cv2.bitwise_or(final_thresh, thresh)
+        
+        return final_thresh
+
 # ==================== 多线程处理类 ====================
 
 class FrameProcessor:
@@ -302,6 +509,11 @@ class FrameProcessor:
         self.frame_queue = Queue(maxsize=10)  # 限制队列大小防止内存溢出
         self.result_queue = Queue(maxsize=10)
         self.running = True
+        self.use_multithread = True  # 默认启用多线程
+        
+    def set_multithread(self, enabled: bool):
+        """设置是否使用多线程"""
+        self.use_multithread = enabled
         
     def process_frame_task(self, frame1, frame2, threshold, backend):
         """线程任务函数"""
@@ -311,6 +523,27 @@ class FrameProcessor:
         except Exception as e:
             print(f"线程处理失败: {e}")
             return None
+    
+    def process_frames(self, frame1, frame2, threshold, backend):
+        """处理帧，根据设置选择多线程或单线程"""
+        if not self.use_multithread:
+            # 单线程处理
+            return backend.process_frames(frame1, frame2, threshold)
+            
+        try:
+            # 多线程处理
+            self.frame_queue.put((frame1, frame2))
+            if not self.result_queue.empty():
+                future = self.result_queue.get()
+                new_thresh = future.result()
+                if new_thresh is not None:
+                    if new_thresh.dtype != np.uint8:
+                        new_thresh = new_thresh.astype(np.uint8)
+                    return new_thresh
+            return backend.process_frames(frame1, frame2, threshold)  # 回退到单线程
+        except Exception as e:
+            print(f"多线程处理失败: {str(e)}，使用单线程")
+            return backend.process_frames(frame1, frame2, threshold)
     
     def start_processing(self, threshold, backend):
         """启动处理线程"""
@@ -342,13 +575,13 @@ class FrameProcessor:
         """停止处理线程"""
         self.running = False
         self.executor.shutdown(wait=True)
-        if self.worker_thread.is_alive():
+        if hasattr(self, 'worker_thread') and self.worker_thread.is_alive():
             self.worker_thread.join()
 
 # ==================== 主程序 ====================
 
 # 全局变量
-version = "v70.1.8"  # 版本
+version = "v70.4.7"  # 版本
 author = "杜玛"
 copyrigh = "Copyright © 杜玛. All rights reserved."
 threshold = 30  # 变化检测阈值
@@ -356,29 +589,109 @@ min_contour_area = 500  # 最小变化区域
 monitoring_process = None  # 当前监控的进程
 monitoring_camera = None  # 当前监控的摄像头
 sct = mss()  # 屏幕截图对象
-frame_rate = 60  # 帧率
+frame_rate = 30  # 帧率
 lock_aspect_ratio = True  # 是否锁定宽高比
 monitor_area_roi = None  # 监控区域的ROI
 font_path = "msyh.ttf"
-max_recommended_fps = 60
+max_recommended_fps = 30
 performance_test_done = False
 last_update_time = None  # 用于计算实际帧率
 actual_fps = 0          # 记录实际帧率
 cpu_monitor_enabled = True  # 是否启用CPU监控
 frame_count = 0  # 用于计数帧数
 last_boxes = []  # 存储上一帧的检测框
-fade_frames = 3  # 渐隐帧数，控制渐隐速度
+fade_effect_enabled = False  # 是否启用渐隐效果
+fade_frames = 10  # 渐隐帧数，控制渐隐速度
+fade_boxes = []  # 存储渐隐框的列表
+use_multithread = True  # 是否使用多线程处理
 acceleration_manager = AccelerationManager()
 frame_processor = FrameProcessor()  # 多线程处理器
+adaptive_fps_enabled = True  # 是否启用自适应帧率
+max_fps_limit = 60          # 帧率上限
+min_fps_limit = 5           # 帧率下限
+performance_mode = "平衡"  # 性能模式：performance/balanced/quality 性能模式：性能/平衡/画质
+dynamic_threshold_enabled = False  # 动态阈值调节
+current_load_factor = 1.0    # 当前负载系数（用于动态调节）
+log_messages = []  # 存储日志消息
+max_log_entries = 100  # 最大日志条目数
+last_fps_warning_time = 0  # 上次发出帧率警告的时间
+fps_warning_interval = 30   # 帧率警告最小间隔(秒)
+algorithm_manager = None  # 算法管理器（稍后初始化）
+show_algorithm_debug = False  # 是否显示算法调试信息
+
+
+
+# 添加日志记录函数
+def log_message(message, level="INFO"):
+    """线程安全的日志记录函数"""
+    global log_messages
+    # 生成日志条目
+    timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
+    log_entry = f"[{timestamp}] [{level}] {message}"
+    
+    # 添加到日志列表
+    log_messages.append(log_entry)
+    if len(log_messages) > max_log_entries:
+        log_messages.pop(0)
+    
+    # 更新日志显示
+    if 'log_text' in globals():
+        def _log():
+            log_text.config(state=tk.NORMAL)
+            log_text.insert(tk.END, log_entry + "\n")
+            log_text.see(tk.END)  # 自动滚动到底部
+            log_text.config(state=tk.DISABLED)
+
+        # 确保在主线程执行UI更新
+        if root and root.winfo_exists():
+            root.after(0, _log)
+
+    
+    # 同时在状态栏显示重要消息
+    if level in ["WARNING", "ERROR"]:
+        status_bar.config(text=message, fg="red" if level == "ERROR" else "red")
+
+def adjust_performance_settings():
+    """根据当前负载动态调节参数"""
+    global threshold, frame_rate, current_load_factor
+    
+    if not adaptive_fps_enabled:
+        return
+    
+    # 获取当前CPU/GPU负载
+    cpu_load = psutil.cpu_percent() / 100
+    mem_load = psutil.virtual_memory().percent / 100
+    current_load = max(cpu_load, mem_load)
+    
+    # 计算负载系数（0.5-1.5范围）
+    current_load_factor = 0.5 + current_load
+    
+    # 根据性能模式调节
+    if performance_mode == "性能":
+        frame_rate = int(max_fps_limit * (1.8 - current_load_factor))
+        if dynamic_threshold_enabled:
+            threshold = min(100, int(30 * current_load_factor))
+    elif performance_mode == "画质":
+        frame_rate = max(min_fps_limit, int(max_fps_limit * (1.2 - current_load_factor/2)))
+    else:  # balanced
+        frame_rate = int(max_fps_limit * (1.5 - current_load_factor))
+    
+    # 确保在合理范围内
+    frame_rate = max(min_fps_limit, min(max_fps_limit, frame_rate))
+    threshold = max(5, min(100, threshold))
 
 # 创建主窗口
 root = tk.Tk()
+
+# 初始化算法管理器
+algorithm_manager = AlgorithmManager()
+
 root.after(100, lambda: (
     detect_max_fps(),
-    status_bar.config(text=f"系统检测: 推荐最大帧率 {max_recommended_fps}FPS | 加速方式: {acceleration_manager.get_current_backend().name}")
+    log_message(f"系统检测: 推荐最大帧率 {max_recommended_fps}FPS | 加速方式: {acceleration_manager.get_current_backend().name}")
 ))
 root.title(f"智能变化检测系统 ({version} | {author} | {copyrigh})")
-root.geometry("500x800")  # 设置窗口大小
+root.geometry("500x850")  # 设置窗口大小
 root.minsize(100, 100)  # 设置最小窗口大小
 
 # 创建主框架
@@ -395,7 +708,7 @@ canvas.pack(fill=tk.BOTH, expand=True)
 
 # 创建控制面板区域
 control_panel_frame = tk.Frame(main_frame, bd=2, relief=tk.RAISED)
-control_panel_frame.pack(fill=tk.X)
+control_panel_frame.pack(fill=tk.X, pady=5, ipady=2)
 
 # 控制面板内容框架
 control_panel = tk.Frame(control_panel_frame)
@@ -459,11 +772,24 @@ def get_process_windows():
 # 获取可用的摄像头列表
 def get_available_cameras(max_test=5):
     cameras = []
+    backends = [
+        cv2.CAP_DSHOW,  # DirectShow
+        cv2.CAP_MSMF,   # Microsoft Media Foundation
+        cv2.CAP_ANY     # 自动选择
+    ]
+
     for i in range(max_test):
-        cap = cv2.VideoCapture(i)
-        if cap.isOpened():
-            cameras.append(i)
-            cap.release()
+        for backend in backends:
+            try:
+                cap = cv2.VideoCapture(i, backend)
+                if cap.isOpened():
+                    cameras.append(i)
+                    cap.release()
+                    break  # 找到一个可用的后端就停止尝试
+                else:
+                    cap.release()
+            except:
+                continue
     return cameras
 
 # 获取窗口的矩形区域
@@ -572,7 +898,7 @@ def create_process_selection_window():
         camera_button.config(text="选择镜头监控")
         
         selection_window.destroy()
-        status_bar.config(text=f"已开始监控进程: {monitoring_process['name']}")
+        log_message(f"已开始监控进程: {monitoring_process['name']}")
     
     # 取消按钮
     def on_cancel():
@@ -602,7 +928,7 @@ def create_camera_selection_window():
     # 获取可用摄像头
     cameras = get_available_cameras()
     if not cameras:
-        status_bar.config(text="没有检测到可用的摄像头")
+        log_message("没有检测到可用的摄像头")
         selection_window.destroy()
         return
     
@@ -622,7 +948,7 @@ def create_camera_selection_window():
     def on_select():
         selected_item = tree.focus()
         if not selected_item:
-            status_bar.config(text="请先选择一个摄像头")
+            log_message("请先选择一个摄像头")
             return
         
         item_data = tree.item(selected_item)
@@ -635,7 +961,7 @@ def create_camera_selection_window():
         process_button.config(text="选择监控进程")
         
         selection_window.destroy()
-        status_bar.config(text=f"已开始监控摄像头: {monitoring_camera}")
+        log_message(f"已开始监控摄像头: {monitoring_camera}")
     
     # 取消按钮
     def on_cancel():
@@ -658,7 +984,7 @@ def toggle_process_monitoring():
         # 停止监控
         monitoring_process = None
         process_button.config(text="选择监控进程")
-        status_bar.config(text="已停止监控")
+        log_message("已停止监控")
     else:
         # 开始监控 - 打开进程选择窗口
         monitoring_camera = None  # 清除摄像头监控
@@ -673,7 +999,7 @@ def toggle_camera_monitoring():
         # 停止监控
         monitoring_camera = None
         camera_button.config(text="选择镜头监控")
-        status_bar.config(text="已停止监控")
+        log_message("已停止监控")
     else:
         # 开始监控 - 打开摄像头选择窗口
         monitoring_process = None  # 清除进程监控
@@ -742,9 +1068,9 @@ def select_monitor_area():
         # 确保选择的区域有效
         if abs(x2 - x1) > 10 and abs(y2 - y1) > 10:  # 最小10像素的宽度和高度
             monitor_area_roi = (x1, y1, x2-x1, y2-y1)
-            status_bar.config(text=f"已设置监控区域: {monitor_area_roi}")
+            log_message(f"已设置监控区域: {monitor_area_roi}")
         else:
-            status_bar.config(text="选择区域太小，请重新选择")
+            log_message("选择区域太小，请重新选择")
             return
         
         temp_window.destroy()
@@ -822,12 +1148,206 @@ def detect_max_fps():
     performance_test_done = True
     return max_recommended_fps
 
+# 添加帧时间记录
+frame_times = collections.deque(maxlen=60)  # 记录最近60帧时间
+
+def process_frame_roi(frame):
+    """处理指定帧区域的核心函数"""
+    global last_boxes, fade_boxes
+    
+    # 获取两帧用于比较
+    frame1 = frame.copy()
+    time.sleep(1.0/frame_rate)  # 等待适当时间获取下一帧
+    frame2 = get_next_frame()   # 获取下一帧
+    
+    if frame2 is None or frame1.shape != frame2.shape:
+        return frame1
+    
+    # 使用当前加速后端处理帧
+    backend = acceleration_manager.get_current_backend()
+    thresh = backend.process_frames(frame1, frame2, threshold)
+    
+    # 查找轮廓
+    contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    
+    # 更新检测框
+    current_boxes = []
+    for contour in contours:
+        if cv2.contourArea(contour) > min_contour_area:
+            x, y, w, h = cv2.boundingRect(contour)
+            current_boxes.append((x, y, w, h))
+            cv2.rectangle(frame, (x, y), (x+w, y+h), (0, 255, 0), 2)
+    
+    # 渐隐效果处理
+    if fade_effect_enabled:
+        fade_boxes = [(box, fade_frames) for box in current_boxes] + \
+                    [(box, count-1) for box, count in fade_boxes if count > 1]
+        
+        for box, count in fade_boxes:
+            if box not in current_boxes:
+                alpha = count / fade_frames
+                color = (0, int(255*alpha), int(255*(1-alpha)))
+                cv2.rectangle(frame, 
+                             (box[0], box[1]), 
+                             (box[0]+box[2], box[1]+box[3]), 
+                             color, 
+                             1 + int(2*alpha))
+    
+    last_boxes = current_boxes
+    return frame
+
+def get_next_frame():
+    """获取下一帧"""
+    if monitoring_camera is not None:
+        cap = cv2.VideoCapture(monitoring_camera)
+        ret, frame = cap.read()
+        cap.release()
+        return frame if ret else None
+    else:
+        rect = get_window_rect(monitoring_process['hwnd'])
+        monitor_area = {
+            "left": rect["left"],
+            "top": rect["top"],
+            "width": rect["width"],
+            "height": rect["height"]
+        }
+        if monitor_area_roi:
+            x, y, w, h = monitor_area_roi
+            monitor_area["left"] += x
+            monitor_area["top"] += y
+            monitor_area["width"] = w
+            monitor_area["height"] = h
+        frame = np.array(sct.grab(monitor_area))
+        return cv2.cvtColor(frame, cv2.COLOR_BGRA2BGR)
+
 # 定义更新帧的函数
 def update_frame():
-    global last_boxes
+    global last_boxes, fade_boxes,last_update_time,actual_fps,frame_count,skip_counter
+    # 帧率过高警告
+    global last_fps_warning_time
+    current_time = time.time()
+    
+    if (frame_rate > 120 or abs(actual_fps - frame_rate) > 10) and \
+        (current_time - last_fps_warning_time > fps_warning_interval):
+    
+        status_text = f"⚠️ 帧率过高: 设置 {frame_rate}FPS, 实际 {actual_fps:.1f}FPS"
+        status_bar.config(text=status_text, fg="red")
+        last_fps_warning_time = current_time
+
+
+
+        # 1. 帧跳过逻辑
+    if frame_skip_var.get() > 0:
+        if not hasattr(update_frame, 'skip_counter'):
+            update_frame.skip_counter = 0
+        update_frame.skip_counter += 1
+        if update_frame.skip_counter <= frame_skip_var.get():
+            root.after(max(1, int(1000/frame_rate)), update_frame)
+            return
+        update_frame.skip_counter = 0
+    
+    # 2. 分辨率调节
+    if monitoring_camera is not None or monitoring_process:
+        try:
+            # 获取原始帧
+            if monitoring_camera is not None:
+                cap = cv2.VideoCapture(monitoring_camera)
+                ret, original_frame = cap.read()
+                cap.release()
+                if not ret:
+                    root.after(30, update_frame)
+                    return
+            else:
+                rect = get_window_rect(monitoring_process['hwnd'])
+                monitor_area = {
+                    "left": rect["left"],
+                    "top": rect["top"],
+                    "width": rect["width"],
+                    "height": rect["height"]
+                }
+                if monitor_area_roi:
+                    x, y, w, h = monitor_area_roi
+                    monitor_area["left"] += x
+                    monitor_area["top"] += y
+                    monitor_area["width"] = w
+                    monitor_area["height"] = h
+                original_frame = np.array(sct.grab(monitor_area))
+                original_frame = cv2.cvtColor(original_frame, cv2.COLOR_BGRA2BGR)
+            
+            # 应用分辨率缩放
+            scale = resolution_scale_var.get()
+            if scale < 1.0:
+                working_frame = cv2.resize(original_frame, (0,0), fx=scale, fy=scale)
+            else:
+                working_frame = original_frame.copy()
+            
+            # 3. ROI自动跟踪
+            if roi_tracking_var.get() and len(last_boxes) > 0:
+                # 计算ROI区域
+                x_min = min(box[0] for box in last_boxes)
+                y_min = min(box[1] for box in last_boxes)
+                x_max = max(box[0]+box[2] for box in last_boxes)
+                y_max = max(box[1]+box[3] for box in last_boxes)
+                
+                # 扩大ROI区域20%
+                margin_x = int((x_max - x_min) * 0.2)
+                margin_y = int((y_max - y_min) * 0.2)
+                roi = (
+                    max(0, x_min - margin_x),
+                    max(0, y_min - margin_y),
+                    min(working_frame.shape[1], x_max + margin_x) - max(0, x_min - margin_x),
+                    min(working_frame.shape[0], y_max + margin_y) - max(0, y_min - margin_y)
+                )
+                
+                # 只处理ROI区域
+                roi_frame = working_frame[roi[1]:roi[1]+roi[3], roi[0]:roi[0]+roi[2]]
+                processed_roi = process_frame_roi(roi_frame)  # 处理ROI区域
+                
+                # 将处理结果放回原图
+                working_frame[roi[1]:roi[1]+roi[3], roi[0]:roi[0]+roi[2]] = processed_roi
+            else:
+                working_frame = process_frame_roi(working_frame)
+            
+            # 如果缩放过，将结果放大回原始尺寸
+            if scale < 1.0:
+                working_frame = cv2.resize(working_frame, (original_frame.shape[1], original_frame.shape[0]))
+            
+            # 更新显示
+            update_video_display(working_frame)
+            
+            # 4. 动态检测间隔
+            if dynamic_interval_var.get():
+                if len(last_boxes) == 0:  # 没有检测到变化
+                    root.after(max(1, int(2000/frame_rate)), update_frame)  # 降低检测频率
+                    return
+            
+        except Exception as e:
+            print(f"优化处理出错: {str(e)}")
+
+    # 1. 安全获取时间戳
+    try:
+        current_time = time.time()
+    except:
+        current_time = last_update_time or time.time()
+    
+    # 2. 计算时间差（带多重保护）
+    time_diff = 0.033  # 默认30FPS的间隔
+    if last_update_time is not None:
+        time_diff = max(0.001, current_time - last_update_time)  # 最小1ms间隔
+    
+    # 3. 更新帧率计算
+    actual_fps = 0.9 * actual_fps + 0.1 * (1 / time_diff)
+    last_update_time = current_time
+    
+    # 4. 帧率显示保护
+    if not 0 < actual_fps < 1000:  # 合理范围检查
+        actual_fps = 30.0
+
+
     # 性能监控
-    global last_update_time, actual_fps
-    global frame_count
+
+    if frame_count % 10 == 0:
+        adjust_performance_settings()
 
     # 统一性能计时起点
     start_time = time.time()
@@ -839,40 +1359,86 @@ def update_frame():
         cpu_percent = psutil.cpu_percent(interval=0.1)
 
         if cpu_percent > 80 and frame_rate > 60:
-            status_bar.config(
+            log_message(
                 text=f"⚠️ CPU过载: {cpu_percent}% | 实际FPS: {actual_fps:.1f}/{frame_rate}",
                 fg="red"
             )
     
     # 实际帧率计算
     current_time = time.time()
-    if last_update_time:
-        actual_fps = 0.9 * actual_fps + 0.1 * (1 / (current_time - last_update_time))  # 平滑处理
+
+    # 安全处理帧率计算
+    if last_update_time is not None and current_time > last_update_time:
+        time_diff = current_time - last_update_time
+        actual_fps = 0.9 * actual_fps + 0.1 * (1 / time_diff)  # 平滑处理
     last_update_time = current_time
+
 
     if monitoring_camera is not None:
         # 摄像头模式
-        cap = cv2.VideoCapture(monitoring_camera)
-        if not cap.isOpened():
-            status_bar.config(text=f"无法打开摄像头 {monitoring_camera}")
-            root.after(1000, update_frame)  # 1秒后重试
-            return
-        
-        ret, current_frame = cap.read()
-        if not ret:
-            status_bar.config(text="无法读取视频帧")
+        try:
+            # 尝试多种后端
+            backends = [cv2.CAP_DSHOW, cv2.CAP_MSMF, cv2.CAP_ANY]
+            cap = None
+            
+            for backend in backends:
+                try:
+                    cap = cv2.VideoCapture(monitoring_camera, backend)
+                    if cap.isOpened():
+                        break
+                except:
+                    if cap:
+                        cap.release()
+                    continue
+                    
+            if not cap or not cap.isOpened():
+                log_message(f"无法打开摄像头 {monitoring_camera}", fg="red")
+                if cap:
+                    cap.release()
+                root.after(1000, update_frame)
+                return
+                
+            # 设置摄像头参数以获得更稳定的帧率
+            cap.set(cv2.CAP_PROP_FPS, frame_rate)
+            cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+            
+            # 读取第一帧
+            ret, current_frame = cap.read()
+            if not ret:
+                log_message("无法读取视频帧")
+                cap.release()
+                root.after(30, update_frame)
+                return
+            
+            # 读取第二帧
+            ret, next_frame = cap.read()
+            if not ret:
+                log_message("无法读取视频帧")
+                cap.release()
+                root.after(30, update_frame)
+                return
+            
+            # 释放摄像头资源
             cap.release()
-            root.after(30, update_frame)
+            
+            # 检查帧尺寸是否有效
+            if current_frame is None or next_frame is None:
+                log_message("获取的帧无效", fg="red")
+                root.after(30, update_frame)
+                return
+                
+            # 统一帧尺寸（如果两帧尺寸不一致）
+            if current_frame.shape != next_frame.shape:
+                next_frame = cv2.resize(next_frame, (current_frame.shape[1], current_frame.shape[0]))
+                
+        except Exception as e:
+            log_message(f"摄像头错误: {str(e)}", "ERROR")
+            globals()["monitoring_camera"] = None
+            camera_button.config(text="选择镜头监控")
+            root.after(1000, update_frame)
             return
-        
-        ret, next_frame = cap.read()
-        if not ret:
-            status_bar.config(text="无法读取视频帧")
-            cap.release()
-            root.after(30, update_frame)
-            return
-        
-        cap.release()
+
     elif monitoring_process:
         # 进程监控模式
         try:
@@ -906,8 +1472,11 @@ def update_frame():
             if process_time > 10:  # 如果单次处理超过10ms
                 status_bar.config(text=f"警告：处理延迟 {process_time:.1f}ms", fg="red")
 
+
         except Exception as e:
-            status_bar.config(text=f"监控出错: {str(e)}", fg="red")
+            log_message(f"监控出错: {str(e)}", "ERROR")
+            globals()["monitoring_process"] = None
+            process_button.config(text="选择镜头监控")
             root.after(1000, update_frame)  # 1秒后重试
             return
     else:
@@ -934,28 +1503,20 @@ def update_frame():
         root.after(30, update_frame)
         return
 
-    # 使用多线程处理帧
+    # 使用当前算法处理帧
     backend = acceleration_manager.get_current_backend()
-    # 默认使用单线程处理
-    thresh = backend.process_frames(current_frame, next_frame, threshold)
-
-    try:
-        # 将帧放入队列
-        frame_processor.frame_queue.put((current_frame, next_frame))
-        
-        # 检查结果队列
-        if not frame_processor.result_queue.empty():
-            future = frame_processor.result_queue.get()
-            new_thresh = future.result()
-            if new_thresh is not None:
-                # 确保 thresh 是 uint8 类型
-                if new_thresh.dtype != np.uint8:
-                    new_thresh = new_thresh.astype(np.uint8)
-                thresh = new_thresh  # 使用多线程处理结果
-    except Exception as e:
-        print(f"多线程处理失败: {str(e)}，使用单线程结果")
-
+    if use_multithread:
+        thresh = frame_processor.process_frames(current_frame, next_frame, threshold, backend)
+    else:
+        thresh = algorithm_manager.process_frame(current_frame, next_frame, threshold)
     
+    # 显示算法调试信息
+    if show_algorithm_debug:
+        debug_info = f"算法: {algorithm_manager.current_algorithm}"
+        if algorithm_manager.current_algorithm in algorithm_manager.algorithm_presets:
+            debug_info += f" ({', '.join(algorithm_manager.algorithm_presets[algorithm_manager.current_algorithm])})"
+        log_message(debug_info, "DEBUG")    
+
     # 查找轮廓
     contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     
@@ -975,15 +1536,29 @@ def update_frame():
             x, y, w, h = cv2.boundingRect(contour)
             current_boxes.append((x, y, w, h))
             cv2.rectangle(display_frame, (x, y), (x+w, y+h), (0, 255, 0), 2)
+    # 渐隐效果处理
+    if fade_effect_enabled:
+        # 更新渐隐框列表
+        fade_boxes = [(box, fade_frames) for box in current_boxes] + \
+                    [(box, count-1) for box, count in fade_boxes if count > 1]
     
-    # 渐隐旧框
-    for i, (x, y, w, h) in enumerate(last_boxes):
-        if (x, y, w, h) not in current_boxes:
-            alpha = i / fade_frames
-            color = (0, int(255*alpha), 255)
-            cv2.rectangle(display_frame, (x, y), (x+w, y+h), color, 1)
-
-    last_boxes = current_boxes[-10:]
+        # 绘制渐隐框
+        for box, count in fade_boxes:
+            if box not in current_boxes:  # 只绘制消失的框
+                alpha = count / fade_frames  # 计算透明度
+                color = (0, int(255*alpha), int(255*(1-alpha)))  # 从绿渐变到黄
+                cv2.rectangle(display_frame, 
+                             (box[0], box[1]), 
+                             (box[0]+box[2], box[1]+box[3]), 
+                             color, 
+                             1 + int(2*alpha))  # 线宽也逐渐变细
+    else:
+        # 不启用渐隐效果时的简单绘制
+        for box in current_boxes:
+            cv2.rectangle(display_frame, 
+                         (box[0], box[1]), 
+                         (box[0]+box[2], box[1]+box[3]), 
+                         (0, 255, 0), 2)
 
     # 更新视频显示
     update_video_display(current_frame)
@@ -994,208 +1569,283 @@ def update_frame():
         actual_fps = 0.9 * actual_fps + 0.1 * (1 / (current_time - last_update_time))
     last_update_time = current_time
 
+    #状态栏显示保护
+    fps_display = f"{min(999, max(1, actual_fps)):.1f}"  # 限制显示范围1-999
+
     # 构建状态栏文本
     backend = acceleration_manager.get_current_backend()
-    status_text = f"运行中: {actual_fps:.1f}FPS | 加速: {backend.name}"
+    status_text = (
+        f"运行中: {fps_display}FPS/{frame_rate}FPS | "
+        f"负载: {current_load_factor*100:.0f}% | "
+        f"模式: {performance_mode}"
+    )
+    
+    # 帧率过高警告
     if frame_rate > 120 or abs(actual_fps - frame_rate) > 10:
+        # 初始化status_text变量
+        status_text = ""
+    
+        # 构建基本状态信息
+        backend = acceleration_manager.get_current_backend()
+        status_text = (
+            f"运行中: {fps_display}FPS/{frame_rate}FPS | "
+            f"负载: {current_load_factor*100:.0f}% | "
+            f"模式: {performance_mode} (设置: {frame_rate}FPS)"
+        )
+    
+        status_text += f" (设置: {frame_rate}FPS)"
+        status_bar.config(text=status_text, fg="red")
+    
+        # 使用线程池异步记录日志，避免阻塞主线程
+        def log_fps_warning():
+            # global status_text
+            status_text = f"⚠️ 帧率过高: 设置 {frame_rate}FPS, 实际 {actual_fps:.1f}FPS"
+            status_bar.config(text=status_text, fg="red")
+            # 可选：如果需要同时记录日志可以取消下面注释
+            # log_message(status_text, "WARNING")
+    
+        threading.Thread(target=log_fps_warning, daemon=True).start()
+        last_fps_warning_time = current_time
         status_text += f" (设置: {frame_rate}FPS)"
         status_bar.config(fg="red")
+        status_text += f" (⚠️ 帧率过高: 设置 {frame_rate}FPS, 实际 {actual_fps:.1f}FPS)"
     
     if 'cpu_percent' in locals() and cpu_percent > 80:
         status_text += f" | CPU: {cpu_percent}% ⚠️ CPU过载"
-        status_bar.config(fg="red")
+        log_message(f"CPU过载: {cpu_percent}%", "WARNING")
     else:
         status_bar.config(fg="black")
     
+    status_text += f" | 处理方式: {'多线程' if use_multithread else '单线程'}"
     status_bar.config(text=status_text)
 
     # 帧率控制
-    effective_fps = min(frame_rate, 360)
+    #effective_fps = min(frame_rate, 360)
+    #delay = max(1, int(1000 / effective_fps))
+    #root.after(delay, update_frame)
+
+    # 在帧率控制部分使用调节后的frame_rate
+    #effective_fps = min(frame_rate, max_fps_limit) if adaptive_fps_enabled else frame_rate
+    effective_fps = max(1, min(frame_rate, max_fps_limit))
     delay = max(1, int(1000 / effective_fps))
     root.after(delay, update_frame)
 
-# 创建控制面板（添加加速后端选择）
+
+# 创建控制面板布局（优化布局）
+
+
 def create_control_panel():
     global frame_rate_scale, threshold_scale, min_area_scale
     global frame_rate_entry, threshold_entry, min_area_entry
+    global log_text
 
-    # 监控源选择区域
-    source_frame = tk.LabelFrame(control_panel, text="监控源选择", padx=5, pady=5)
-    source_frame.grid(row=0, column=0, sticky="ew", pady=(0,5))
-    
-    # 使用紧凑的按钮布局
-    buttons = [
-        ("选择监控进程", toggle_process_monitoring),
-        ("选择镜头监控", toggle_camera_monitoring),
-        ("选择监控区域", select_monitor_area)
-    ]
-    
-    for col, (text, cmd) in enumerate(buttons):
-        btn = tk.Button(source_frame, text=text, command=cmd)
-        btn.grid(row=0, column=col, padx=2, pady=2, sticky="ew")
-        source_frame.columnconfigure(col, weight=1)
-        if text.startswith("选择监控进程"):
-            global process_button
-            process_button = btn
-        elif text.startswith("选择镜头监控"):
-            global camera_button
-            camera_button = btn
+    # 使用紧凑的Notebook布局
+    tab_control = ttk.Notebook(control_panel)
+    tab_control.pack(fill=tk.BOTH, expand=True, padx=0, pady=0)
 
-    # 参数设置区域
-    settings_frame = tk.LabelFrame(control_panel, text="检测参数设置", padx=5, pady=5)
-    settings_frame.grid(row=1, column=0, sticky="ew")
+    # 主设置标签页 - 使用网格布局并减少间距
+    main_tab = ttk.Frame(tab_control)
+    tab_control.add(main_tab, text="主设置")
+
+    # 监控源选择 - 紧凑按钮布局
+    source_frame = tk.Frame(main_tab, padx=0, pady=0)
+    source_frame.pack(fill=tk.X, padx=2, pady=1)
     
-    # 参数配置项
+    global process_button, camera_button
+    process_button = ttk.Button(source_frame, text="选择进程", command=toggle_process_monitoring, width=8)
+    process_button.pack(side=tk.LEFT, padx=1, pady=0)
+    camera_button = ttk.Button(source_frame, text="选择镜头", command=toggle_camera_monitoring, width=8)
+    camera_button.pack(side=tk.LEFT, padx=1, pady=0)
+    ttk.Button(source_frame, text="选择区域", command=select_monitor_area, width=8).pack(side=tk.LEFT, padx=1, pady=0)
+
+    # 检测参数设置 - 紧凑滑块布局
+    settings_frame = tk.Frame(main_tab)
+    settings_frame.pack(fill=tk.X, padx=2, pady=1)
+
+    # 紧凑的参数滑块
     params = [
-        ("帧率(FPS):", "frame_rate", 1, 360),
-        ("变化阈值:", "threshold", 1, 100),
-        ("最小区域:", "min_contour_area", 1, 1000)
+        ("帧率:", "frame_rate", 1, 360, 4),
+        ("阈值:", "threshold", 1, 100, 3),
+        ("最小区域:", "min_contour_area", 1, 1000, 4)
     ]
     
-    # 先创建所有控件
-    for row, (label_text, var_name, min_val, max_val) in enumerate(params):
-        tk.Label(settings_frame, text=label_text).grid(row=row, column=0, padx=2, pady=2, sticky="e")
+    for label, var, min_val, max_val, width in params:
+        frame = tk.Frame(settings_frame)
+        frame.pack(fill=tk.X, pady=0)
+        tk.Label(frame, text=label, width=5, anchor="e").pack(side=tk.LEFT)
         
-        # 创建滑块
-        if var_name == "frame_rate":
-            frame_rate_scale = tk.Scale(
-                settings_frame, 
-                from_=1, 
-                to=max_recommended_fps if performance_test_done else 360,  # 动态上限
-                orient=tk.HORIZONTAL,
-                length=150
-            )
-            frame_rate_scale.set(min(60, max_recommended_fps))
-            frame_rate_scale.set(globals()[var_name])
-            frame_rate_scale.grid(row=row, column=1, padx=2, pady=2, sticky="ew")
-            
-            frame_rate_entry = tk.Entry(settings_frame, width=4)
-            frame_rate_entry.insert(0, str(globals()[var_name]))
-            frame_rate_entry.grid(row=row, column=2, padx=2, pady=2)
-            
-        elif var_name == "threshold":
-            threshold_scale = tk.Scale(settings_frame, from_=min_val, to=max_val, orient=tk.HORIZONTAL, 
-                                     length=150)
-            threshold_scale.set(globals()[var_name])
-            threshold_scale.grid(row=row, column=1, padx=2, pady=2, sticky="ew")
-            
-            threshold_entry = tk.Entry(settings_frame, width=4)
-            threshold_entry.insert(0, str(globals()[var_name]))
-            threshold_entry.grid(row=row, column=2, padx=2, pady=2)
-            
-        elif var_name == "min_contour_area":
-            min_area_scale = tk.Scale(settings_frame, from_=min_val, to=max_val, orient=tk.HORIZONTAL, 
-                                     length=150)
-            min_area_scale.set(globals()[var_name])
-            min_area_scale.grid(row=row, column=1, padx=2, pady=2, sticky="ew")
-            
-            min_area_entry = tk.Entry(settings_frame, width=4)
-            min_area_entry.insert(0, str(globals()[var_name]))
-            min_area_entry.grid(row=row, column=2, padx=2, pady=2)
-    
-    # 然后绑定事件处理函数
-    def on_frame_rate_scale(val):
-        frame_rate_entry.delete(0, tk.END)
-        frame_rate_entry.insert(0, str(int(float(val))))
-        globals()["frame_rate"] = int(float(val))
-        status_bar.config(text=f"帧率已设置为: {int(float(val))} FPS")
-    
-    def on_threshold_scale(val):
-        threshold_entry.delete(0, tk.END)
-        threshold_entry.insert(0, str(int(float(val))))
-        globals()["threshold"] = int(float(val))
-        status_bar.config(text=f"变化检测阈值已设置为: {int(float(val))}")
-    
-    def on_min_area_scale(val):
-        min_area_entry.delete(0, tk.END)
-        min_area_entry.insert(0, str(int(float(val))))
-        globals()["min_contour_area"] = int(float(val))
-        status_bar.config(text=f"最小变化区域已设置为: {int(float(val))} 像素")
-    
-    frame_rate_scale.config(command=on_frame_rate_scale)
-    threshold_scale.config(command=on_threshold_scale)
-    min_area_scale.config(command=on_min_area_scale)
-    
-    def on_frame_rate_entry(event):
-        try:
-            value = int(frame_rate_entry.get())
-            if 1 <= value <= 120:
-                frame_rate_scale.set(value)
-                globals()["frame_rate"] = value
-                status_bar.config(text=f"帧率已设置为: {value} FPS")
-        except ValueError:
-            pass
-    
-    def on_threshold_entry(event):
-        try:
-            value = int(threshold_entry.get())
-            if 1 <= value <= 100:
-                threshold_scale.set(value)
-                globals()["threshold"] = value
-                status_bar.config(text=f"变化检测阈值已设置为: {value}")
-        except ValueError:
-            pass
-    
-    def on_min_area_entry(event):
-        try:
-            value = int(min_area_entry.get())
-            if 1 <= value <= 1000:
-                min_area_scale.set(value)
-                globals()["min_contour_area"] = value
-                status_bar.config(text=f"最小变化区域已设置为: {value} 像素")
-        except ValueError:
-            pass
-    
-    frame_rate_entry.bind("<Return>", on_frame_rate_entry)
-    threshold_entry.bind("<Return>", on_threshold_entry)
-    min_area_entry.bind("<Return>", on_min_area_entry)        
+        scale = tk.Scale(frame, from_=min_val, to=max_val, orient=tk.HORIZONTAL, 
+                        length=60, showvalue=0, highlightthickness=0)
+        scale.set(globals()[var])
+        scale.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        
+        entry = tk.Entry(frame, width=width)
+        entry.insert(0, str(globals()[var]))
+        entry.pack(side=tk.LEFT, padx=2)
+        
+        # 保存引用
+        if var == "frame_rate":
+            frame_rate_scale = scale
+            frame_rate_entry = entry
+        elif var == "threshold":
+            threshold_scale = scale
+            threshold_entry = entry
+        elif var == "min_contour_area":
+            min_area_scale = scale
+            min_area_entry = entry
 
-    # 加速后端选择区域
-    accel_frame = tk.LabelFrame(control_panel, text="加速设置", padx=5, pady=5)
-    accel_frame.grid(row=2, column=0, sticky="ew", pady=(5, 0))
+    # 显示设置 - 紧凑复选框
+    display_frame = tk.Frame(main_tab)
+    display_frame.pack(fill=tk.X, padx=2, pady=1)
     
-    tk.Label(accel_frame, text="加速后端:").grid(row=0, column=0, padx=2, pady=2, sticky="e")
+    # 使用小号复选框
+    tk.Checkbutton(display_frame, text="宽高比", variable=tk.BooleanVar(value=lock_aspect_ratio),
+                  command=lambda: globals().update(lock_aspect_ratio=not lock_aspect_ratio)).pack(side=tk.LEFT, padx=2)
+    tk.Checkbutton(display_frame, text="置顶", variable=tk.BooleanVar(value=root.attributes('-topmost')),
+                  command=lambda: root.attributes('-topmost', not root.attributes('-topmost'))).pack(side=tk.LEFT, padx=2)
     
+    # 渐隐效果紧凑布局
+    fade_var = tk.BooleanVar(value=fade_effect_enabled)
+    tk.Checkbutton(display_frame, text="渐隐", variable=fade_var,
+                  command=lambda: globals().update(fade_effect_enabled=fade_var.get())).pack(side=tk.LEFT, padx=2)
+    tk.Scale(display_frame, from_=1, to=30, orient=tk.HORIZONTAL, 
+            length=40, showvalue=0, variable=tk.IntVar(value=fade_frames),
+            command=lambda v: globals().update(fade_frames=int(v))).pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+    # 加速设置 - 紧凑下拉框
+    accel_frame = tk.Frame(main_tab)
+    accel_frame.pack(fill=tk.X, padx=2, pady=1)
+    
+    tk.Label(accel_frame, text="后端:").pack(side=tk.LEFT)
     backend_var = tk.StringVar()
-    backend_menu = ttk.Combobox(accel_frame, textvariable=backend_var, state="readonly")
-    backend_menu['values'] = [backend.name for backend in acceleration_manager.backends]
-    backend_menu.current([backend.name for backend in acceleration_manager.backends].index(
-        acceleration_manager.get_current_backend().name))
-    backend_menu.grid(row=0, column=1, padx=2, pady=2, sticky="ew")
+    backend_menu = ttk.Combobox(accel_frame, textvariable=backend_var, state="readonly", width=8)
+    backend_menu['values'] = [b.name for b in acceleration_manager.backends]
+    backend_menu.current([b.name for b in acceleration_manager.backends].index(acceleration_manager.get_current_backend().name))
+    backend_menu.pack(side=tk.LEFT, padx=2)
+    backend_menu.bind("<<ComboboxSelected>>", lambda e: acceleration_manager.set_backend(backend_var.get()))
+
+    # 性能调节 - 紧凑布局
+    perf_frame = tk.Frame(main_tab)
+    perf_frame.pack(fill=tk.X, padx=2, pady=1)
     
-    def on_backend_change(event):
-        selected_backend = backend_var.get()
-        if acceleration_manager.set_backend(selected_backend):
-            status_bar.config(text=f"已切换到 {selected_backend} 加速")
-            # 重新检测最大帧率
-            detect_max_fps()
-            # 更新帧率滑块上限
-            frame_rate_scale.config(to=max_recommended_fps if performance_test_done else 360)
+    # 第一行
+    tk.Checkbutton(perf_frame, text="自适应", variable=tk.BooleanVar(value=adaptive_fps_enabled),
+                  command=lambda: globals().update(adaptive_fps_enabled=not adaptive_fps_enabled)).pack(side=tk.LEFT, padx=2)
+    tk.Checkbutton(perf_frame, text="动态阈值", variable=tk.BooleanVar(value=dynamic_threshold_enabled),
+                  command=lambda: globals().update(dynamic_threshold_enabled=not dynamic_threshold_enabled)).pack(side=tk.LEFT, padx=2)
+    
+    # 第二行
+    tk.Label(perf_frame, text="模式:").pack(side=tk.LEFT, padx=2)
+    mode_var = tk.StringVar(value=performance_mode)
+    ttk.Combobox(perf_frame, textvariable=mode_var, values=["性能", "平衡", "画质"], 
+                state="readonly", width=6).pack(side=tk.LEFT, padx=2)
+    mode_var.trace("w", lambda *_: globals().update(performance_mode=mode_var.get()))
+    
+    # 第三行
+    tk.Checkbutton(perf_frame, text="多线程", variable=tk.BooleanVar(value=use_multithread),
+                  command=lambda: globals().update(use_multithread=not use_multithread)).pack(side=tk.LEFT, padx=2)
+    tk.Checkbutton(perf_frame, text="CPU监控", variable=tk.BooleanVar(value=cpu_monitor_enabled),
+                  command=lambda: globals().update(cpu_monitor_enabled=not cpu_monitor_enabled)).pack(side=tk.LEFT, padx=2)
+
+    # 高级设置标签页
+    optimize_tab = ttk.Frame(tab_control)
+    tab_control.add(optimize_tab, text="高级")
+
+    # 帧跳过设置
+    skip_frame = tk.Frame(optimize_tab)
+    skip_frame.pack(fill=tk.X, padx=2, pady=1)
+    tk.Label(skip_frame, text="跳过帧数:").pack(side=tk.LEFT)
+    global frame_skip_var
+    frame_skip_var = tk.IntVar(value=0)
+    tk.Scale(skip_frame, from_=0, to=5, orient=tk.HORIZONTAL, variable=frame_skip_var,
+            showvalue=0, length=80).pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+    # 分辨率调节
+    res_frame = tk.Frame(optimize_tab)
+    res_frame.pack(fill=tk.X, padx=2, pady=1)
+    tk.Label(res_frame, text="分辨率:").pack(side=tk.LEFT)
+    global resolution_scale_var
+    resolution_scale_var = tk.DoubleVar(value=1.0)
+    tk.Scale(res_frame, from_=0.3, to=1.0, resolution=0.1, orient=tk.HORIZONTAL,
+            variable=resolution_scale_var, showvalue=0, length=80).pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+    # 处理优化
+    process_frame = tk.Frame(optimize_tab)
+    process_frame.pack(fill=tk.X, padx=2, pady=1)
+    global roi_tracking_var, dynamic_interval_var
+    roi_tracking_var = tk.BooleanVar(value=False)
+    dynamic_interval_var = tk.BooleanVar(value=False)
+    tk.Checkbutton(process_frame, text="ROI跟踪", variable=roi_tracking_var).pack(side=tk.LEFT, padx=2)
+    tk.Checkbutton(process_frame, text="动态间隔", variable=dynamic_interval_var).pack(side=tk.LEFT, padx=2)
+
+    # 算法优化
+    algo_frame = tk.Frame(optimize_tab)
+    algo_frame.pack(fill=tk.X, padx=2, pady=1)
+    
+    # 算法模式选择
+    algo_mode = tk.StringVar(value="single")
+    tk.Radiobutton(algo_frame, text="单一", variable=algo_mode, value="single").pack(side=tk.LEFT, padx=2)
+    tk.Radiobutton(algo_frame, text="组合", variable=algo_mode, value="combo").pack(side=tk.LEFT, padx=2)
+    tk.Radiobutton(algo_frame, text="智能", variable=algo_mode, value="smart").pack(side=tk.LEFT, padx=2)
+    
+    # 算法选择下拉框
+    algo_select = ttk.Combobox(algo_frame, state="readonly", width=12)
+    algo_select['values'] = list(algorithm_manager.available_algorithms.keys())
+    algo_select.current(0)
+    algo_select.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=2)
+    
+    # 算法模式切换
+    def update_algo_mode(*_):
+        if algo_mode.get() == "single":
+            algorithm_manager.set_algorithm(algo_select.get())
+        elif algo_mode.get() == "combo":
+            algorithm_manager.set_algorithm_combo(algo_select.get())
         else:
-            status_bar.config(text=f"无法切换到 {selected_backend}，使用当前后端", fg="red")
-            backend_menu.current([backend.name for backend in acceleration_manager.backends].index(
-                acceleration_manager.get_current_backend().name))
+            algorithm_manager.set_algorithm("智能组合")
     
-    backend_menu.bind("<<ComboboxSelected>>", on_backend_change)
+    algo_mode.trace("w", update_algo_mode)
+    algo_select.bind("<<ComboboxSelected>>", update_algo_mode)
+
+    # 日志标签页
+    log_tab = ttk.Frame(tab_control)
+    tab_control.add(log_tab, text="日志")
+
+    # 紧凑的日志显示
+    log_text = tk.Text(log_tab, wrap=tk.WORD, height=4)
+    log_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
     
-    # 复选框设置
-    lock_aspect_var = tk.BooleanVar(value=lock_aspect_ratio)
-    tk.Checkbutton(
-        settings_frame, 
-        text="保持比例", 
-        variable=lock_aspect_var,
-        command=lambda: globals().update(lock_aspect_ratio=lock_aspect_var.get())
-    ).grid(row=len(params), column=0, padx=2, pady=2, sticky="w")
+    v_scroll = ttk.Scrollbar(log_tab, command=log_text.yview)
+    v_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+    log_text.config(yscrollcommand=v_scroll.set)
     
-    tk.Checkbutton(
-        settings_frame,
-        text="总是置顶",
-        command=lambda: root.attributes('-topmost', not root.attributes('-topmost'))
-    ).grid(row=len(params), column=1, padx=2, pady=2, sticky="w")
+    # 日志控制按钮
+    log_btn_frame = tk.Frame(log_tab)
+    log_btn_frame.pack(fill=tk.X, padx=2, pady=1)
+    ttk.Button(log_btn_frame, text="清除", command=lambda: log_text.delete(1.0, tk.END)).pack(side=tk.LEFT, padx=2)
+    ttk.Button(log_btn_frame, text="复制", command=lambda: root.clipboard_append(log_text.get(1.0, tk.END))).pack(side=tk.LEFT, padx=2)
+
+    # 绑定原有的事件处理
+    frame_rate_scale.config(command=lambda v: (
+        frame_rate_entry.delete(0, tk.END),
+        frame_rate_entry.insert(0, str(int(float(v)))),
+        globals().update(frame_rate=int(float(v)))
+    ))
     
-    # 配置列权重
-    settings_frame.columnconfigure(1, weight=1)
-    control_panel.columnconfigure(0, weight=1)
+    threshold_scale.config(command=lambda v: (
+        threshold_entry.delete(0, tk.END),
+        threshold_entry.insert(0, str(int(float(v)))),
+        globals().update(threshold=int(float(v)))
+    ))
+    
+    min_area_scale.config(command=lambda v: (
+        min_area_entry.delete(0, tk.END),
+        min_area_entry.insert(0, str(int(float(v)))),
+        globals().update(min_contour_area=int(float(v)))
+    ))
+    
+    for entry, var in [(frame_rate_entry, "frame_rate"), (threshold_entry, "threshold"), (min_area_entry, "min_contour_area")]:
+        entry.bind("<Return>", lambda e, v=var: globals().update({v: int(e.widget.get())}))
+
 
 # 创建控制面板
 create_control_panel()
@@ -1206,8 +1856,15 @@ frame_processor.start_processing(threshold, acceleration_manager.get_current_bac
 # 启动更新帧的函数
 update_frame()
 
+# 初始化算法管理器
+algorithm_manager = AlgorithmManager()
+
 # 运行主循环
 root.mainloop()
+
+# 释放算法资源
+if hasattr(algorithm_manager, 'backSub'):
+    algorithm_manager.backSub = None
 
 # 释放资源
 if monitoring_camera is not None:
