@@ -176,6 +176,8 @@ A: 可能是：1) 硬件性能不足 2) 监控窗口太大 3) 算法太过复杂
 每个部分都配有实际应用案例，便于用户理解如何在不同场景下配置系统。同时保持版本号递增（v71.4.8），专业部分给出具体的代码修改示例，既保证了易用性又满足了专业需求。
 
 软件截图：
+
+
 ![image](https://github.com/user-attachments/assets/fbff66d1-7934-4b2a-bb0b-4e4a2b80797d)
 ![image](https://github.com/user-attachments/assets/ba4b8602-6906-425d-aeac-41fda4e1d57f)
 ![image](https://github.com/user-attachments/assets/de46507d-8b69-495e-ab9c-0057748107e1)
