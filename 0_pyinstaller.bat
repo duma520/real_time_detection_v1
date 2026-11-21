@@ -1,0 +1,1 @@
+pyinstaller --windowed --icon=icon.ico --add-data "msyh.ttf;." --hidden-import PySide6.QtCore --hidden-import PySide6.QtGui --hidden-import PySide6.QtWidgets --collect-all cv2 --collect-all numpy --collect-all mss --collect-all psutil real_time_detection.py

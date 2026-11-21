@@ -1,0 +1,103 @@
+### 🤖 Assistant
+
+我将帮你修改代码，添加渐隐效果功能。以下是具体的修改方案：
+
+1. 首先在全局变量部分增加渐隐效果的参数控制：
+
+```python
+# 在全局变量部分（约第300行）添加以下变量
+fade_effect_enabled = True  # 是否启用渐隐效果
+fade_frames = 10  # 渐隐帧数，控制渐隐速度
+fade_boxes = []  # 存储渐隐框的列表
+```
+
+2. 修改 `update_frame()` 函数中的绘制部分，添加渐隐效果逻辑：
+
+```python
+# 在 update_frame() 函数中找到绘制检测框的部分（约第800行）
+# 替换原有的绘制代码为以下内容：
+
+# 绘制带渐隐效果的检测框
+current_boxes = []
+for contour in contours:
+    if cv2.contourArea(contour) > min_contour_area:
+        x, y, w, h = cv2.boundingRect(contour)
+        current_boxes.append((x, y, w, h))
+        cv2.rectangle(display_frame, (x, y), (x+w, y+h), (0, 255, 0), 2)
+
+# 渐隐效果处理
+if fade_effect_enabled:
+    # 更新渐隐框列表
+    fade_boxes = [(box, fade_frames) for box in current_boxes] + \
+                [(box, count-1) for box, count in fade_boxes if count > 1]
+    
+    # 绘制渐隐框
+    for box, count in fade_boxes:
+        if box not in current_boxes:  # 只绘制消失的框
+            alpha = count / fade_frames  # 计算透明度
+            color = (0, int(255*alpha), int(255*(1-alpha)))  # 从绿渐变到黄
+            cv2.rectangle(display_frame, 
+                         (box[0], box[1]), 
+                         (box[0]+box[2], box[1]+box[3]), 
+                         color, 
+                         1 + int(2*alpha))  # 线宽也逐渐变细
+else:
+    # 不启用渐隐效果时的简单绘制
+    for box in current_boxes:
+        cv2.rectangle(display_frame, 
+                     (box[0], box[1]), 
+                     (box[0]+box[2], box[1]+box[3]), 
+                     (0, 255, 0), 2)
+```
+
+3. 在控制面板中添加渐隐效果开关：
+
+```python
+# 在 create_control_panel() 函数中的复选框设置部分（约第1000行）添加：
+
+# 渐隐效果开关
+fade_effect_var = tk.BooleanVar(value=fade_effect_enabled)
+tk.Checkbutton(
+    settings_frame,
+    text="启用渐隐效果",
+    variable=fade_effect_var,
+    command=lambda: globals().update(fade_effect_enabled=fade_effect_var.get())
+).grid(row=len(params)+1, column=0, padx=2, pady=2, sticky="w")
+
+# 渐隐帧数调节
+tk.Label(settings_frame, text="渐隐速度:").grid(row=len(params)+1, column=1, padx=2, pady=2, sticky="e")
+fade_frames_scale = tk.Scale(
+    settings_frame,
+    from_=1,
+    to=30,
+    orient=tk.HORIZONTAL,
+    length=100
+)
+fade_frames_scale.set(fade_frames)
+fade_frames_scale.grid(row=len(params)+1, column=2, padx=2, pady=2, sticky="ew")
+
+def on_fade_frames_change(val):
+    globals()["fade_frames"] = int(float(val))
+fade_frames_scale.config(command=on_fade_frames_change)
+```
+
+4. 版本号更新：
+
+```python
+# 将版本号从 v70.2.10 更新为 v70.2.11
+version = "v70.2.11"  # 版本
+```
+
+这些修改将实现以下功能：
+1. 检测框会从绿色渐变为黄色然后消失
+2. 线宽也会逐渐变细
+3. 可以通过控制面板开关渐隐效果
+4. 可以调节渐隐速度（帧数）
+5. 更新了版本号
+
+渐隐效果的工作原理是：
+- 当检测框消失时，不会立即删除，而是保留在 `fade_boxes` 列表中
+- 每帧减少计数，并根据剩余帧数计算透明度和颜色
+- 当计数减到0时，该框会从列表中移除
+
+这样修改后，用户界面会更加友好，视觉效果也更专业。

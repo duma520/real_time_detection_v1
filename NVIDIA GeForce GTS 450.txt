@@ -1,0 +1,63 @@
+### 🤖 Assistant
+
+您的 **NVIDIA GeForce GTS 450** 显卡的**官方最高支持驱动版本**为 **391.35**（发布于2018年4月），这是NVIDIA为这一老架构（Fermi）显卡提供的最终WHQL认证驱动。以下是详细信息和替代方案：
+
+---
+
+### **1. 官方驱动支持情况**
+- **最后正式版驱动**：  
+  - 版本号：**391.35**（[官方下载链接](https://www.nvidia.com/Download/driverResults.aspx/133577/)）  
+  - 发布日期：2018年4月  
+  - 支持系统：Windows 7/8.1/10（32位和64位）  
+  - **不支持**：Windows 11、新版CUDA、现代游戏API（如Vulkan 1.3）
+
+- **驱动限制**：  
+  - 无法支持PyTorch/TensorFlow等深度学习框架的CUDA加速（需CUDA 10+，但GTS 450仅支持CUDA 3.2）  
+  - 新版游戏（如DirectX 12 Ultimate）可能无法运行。
+
+---
+
+### **2. 替代方案**
+如果您的目标是运行现代应用（如PyTorch），需考虑以下选项：
+
+#### **方案A：升级显卡**
+- **入门级替代**：  
+  - NVIDIA GTX 1050 Ti（支持CUDA 6.1，驱动持续更新）  
+  - AMD RX 6400（无需外接供电，支持Vulkan）  
+- **二手推荐**：  
+  - GTX 1650（约500元，支持CUDA 7.5）
+
+#### **方案B：强制安装新版驱动（不推荐）**
+- 通过修改INF文件可安装新版驱动（如472.12），但会导致：  
+  - 性能下降  
+  - 功能缺失（如PhysX）  
+  - 系统不稳定  
+- **仅适合临时测试**，方法参考：[NVCleanstall工具](https://www.techpowerup.com/nvcleanstall/)
+
+#### **方案C：使用CPU模式**
+- 在PyTorch等软件中强制使用CPU：  
+  ```python
+  device = torch.device('cpu')  # 跳过GPU检测
+  ```
+
+---
+
+### **3. 驱动兼容性验证**
+通过以下命令检查显卡的CUDA支持能力：
+```bash
+nvidia-smi  # 查看驱动版本
+nvcc --version  # 查看CUDA版本（需安装CUDA Toolkit）
+```
+- **GTS 450的输出示例**：  
+  ```
+  CUDA Version: 3.2  # 远低于PyTorch要求的CUDA 10+
+  ```
+
+---
+
+### **4. 结论**
+- **日常使用**：安装391.35驱动即可（Win7/10）。  
+- **开发/游戏**：强烈建议升级显卡（至少GTX 1650）。  
+- **临时方案**：禁用GPU加速功能，改用CPU计算。  
+
+如需进一步帮助，请提供您的具体使用场景（如游戏、AI开发等）。

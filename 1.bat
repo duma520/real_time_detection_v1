@@ -1,0 +1,2 @@
+cls
+python real_time_detection.py

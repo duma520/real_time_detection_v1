@@ -1,1 +1,1 @@
-pyinstaller -w real_time_detection.py
+pyinstaller real_time_detection.spec
